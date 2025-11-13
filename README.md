@@ -16,11 +16,12 @@ A Discord bot that monitors Sleeper fantasy basketball league for free agent pic
 - Environment variables
   - `DISCORD_TOKEN`: Discord bot authentication token
   - `LEAGUE_ID`: Sleeper league identifier
-  - 
+  - `CHANNEL_NAME`: Channel to which alerts are sent and commands are read from
 
 ### Key Configuration
-- `START_DATE`: datetime(2025, 10, 20, 8, tzinfo=timezone.utc)
-- `THRESHOLD_SECONDS`: 
+- `START_DATE`: October 20, 2025 8 AM UTC
+- `DROP_THRESHOLD_MIN`: A player added and dropped within this threshold will not count towards the limit
+- `CHECK_INTERVAL_SEC`: How often the Sleeper API is checked
 
 ## Discord Commands
 - `!pickups` - Display weekly pickup summary with player names and counts per team

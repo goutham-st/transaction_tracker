@@ -12,15 +12,6 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 LEAGUE_ID = os.getenv("LEAGUE_ID")
 CHANNEL_NAME = os.getenv("CHANNEL_NAME")
-DEBUG_MODE = True
-
-seen_transactions = {}
-pickup_counts = defaultdict(list)
-
-START_DATE = datetime(2025, 10, 20, 8, tzinfo=timezone.utc)
-fake_now = datetime(2025, 11, 9, 7, 59, tzinfo=timezone.utc)
-THRESHOLD_SECONDS = 1800
-CHECK_INTERVAL = 60 
 
 if not DISCORD_TOKEN:
     print("ERROR: DISCORD_TOKEN environment variable is not set!")
@@ -30,9 +21,19 @@ if not LEAGUE_ID:
     print("ERROR: LEAGUE_ID environment variable is not set!")
     sys.exit(1)
 
+if not CHANNEL_NAME:
+    print("ERROR: CHANNEL_NAME environment variable is not set!")
+    sys.exit(1)
+
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() in ("true", "1", "yes")
+START_DATE = datetime(2025, 10, 20, 8, tzinfo=timezone.utc)
+DROP_THRESHOLD_MIN = 5
+CHECK_INTERVAL_SEC = 60 
+
+seen_transactions = {}
+pickup_counts = defaultdict(list)
 player_map_cache = {}
 roster_map_cache = {}
-
 send_semaphore = Semaphore()
 
 intents = discord.Intents.default()
@@ -70,9 +71,9 @@ def get_week_by_cutoff(start_date, now=None):
     if now.weekday() == 0 and now.hour < 8:
         now -= timedelta(days=1)
 
-    days_since_monday = (now.weekday() + 7 - 0) % 7
+    days_since_monday = (now.weekday() + 7) % 7
 
-    # Find the most recent Sunday (end of the week)
+    # Find the most recent end of the week
     last_monday = now - timedelta(days=days_since_monday)
     last_monday = last_monday.replace(hour=8,minute=0,second=0,microsecond=0)
     delta = last_monday - start_date
@@ -147,11 +148,9 @@ async def monitor_pickups():
     print(f"Monitoring pickups in #{channel.name}")
     refresh_caches()
     current_week = get_week_by_cutoff(START_DATE)
-    # current_week = get_week_by_cutoff(START_DATE,fake_now)
     
     while not client.is_closed():
         try:            
-            # week = get_week_by_cutoff(START_DATE,fake_now)
             week = get_week_by_cutoff(START_DATE)
             
             if week != current_week:
@@ -212,12 +211,12 @@ async def monitor_pickups():
         except Exception as e:
             print(f"Error in monitor loop: {e}")
         
-        await asyncio.sleep(CHECK_INTERVAL)
+        await asyncio.sleep(CHECK_INTERVAL_SEC)
 
 async def check_pickup(player_id, roster_id, pickup_time, channel):
     try:
         now = datetime.now(timezone.utc)
-        delay = 0 if DEBUG_MODE else max(0, (pickup_time+timedelta(minutes=30)-now).total_seconds())
+        delay = 0 if DEBUG_MODE else max(0, (pickup_time+timedelta(minutes=DROP_THRESHOLD_MIN)-now).total_seconds())
         
         if delay > 0:
             await asyncio.sleep(delay)
@@ -229,13 +228,15 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
         player = player_map_cache.get(player_id, "Unknown Player")
 
         if was_dropped(player_id, roster_id, pickup_time, transctions):
-            print(f"Player {player} was dropped within 30 minutes by team {team}. No action needed.")
+            print(f"Player {player} was dropped within {DROP_THRESHOLD_MIN} minutes by team {team}. No action needed.")
             return
 
         pickup_counts[team].append(player)
         pickup_number = len(pickup_counts[team])
 
-        if pickup_number == 4:
+        if pickup_number > 4:
+            suffix = "🚨🔥 **Limit surpassed!**"
+        elif pickup_number == 4:
             suffix = "🚨 **Limit reached!**"
         elif pickup_number == 3:
             suffix = "⚠️ One pickup left this week."
@@ -245,13 +246,13 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
         message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/4 this week\n{suffix}"
         await safe_send(channel, message)
     except Exception as e:
-        print(f"❌ Error in check_pickup: {e}")
+        print(f"Error in check_pickup: {e}")
 
 def was_dropped(player_id, roster_id, pickup_time, transactions):
     # Query Sleeper API for transactions since `pickup_time`
     # Return True if player_id was dropped by same manager
 
-    cutoff = pickup_time + timedelta(minutes=30)
+    cutoff = pickup_time + timedelta(minutes=DROP_THRESHOLD_MIN)
 
     for tx in transactions:
         if tx['type'] not in ['free_agent', 'waiver']:
