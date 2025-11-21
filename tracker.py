@@ -25,7 +25,7 @@ if not CHANNEL_NAME:
     print("ERROR: CHANNEL_NAME environment variable is not set!")
     sys.exit(1)
 
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() in ("true", "1", "yes")
+CATCHUP_MODE = False
 START_DATE = datetime(2025, 10, 20, 8, tzinfo=timezone.utc)
 DROP_THRESHOLD_MIN = 5
 CHECK_INTERVAL_SEC = 60 
@@ -154,7 +154,7 @@ async def monitor_pickups():
             week = get_week_by_cutoff(START_DATE)
             
             if week != current_week:
-                channel.send(format_summary(current_week))
+                await safe_send(channel, format_summary(current_week))
 
                 cutoff = datetime.now(timezone.utc) - timedelta(days=14)
                 
@@ -216,10 +216,6 @@ async def monitor_pickups():
 async def check_pickup(player_id, roster_id, pickup_time, channel):
     try:
         now = datetime.now(timezone.utc)
-        delay = 0 if DEBUG_MODE else max(0, (pickup_time+timedelta(minutes=DROP_THRESHOLD_MIN)-now).total_seconds())
-        
-        if delay > 0:
-            await asyncio.sleep(delay)
 
         week = get_week_by_cutoff(START_DATE,pickup_time)
         transctions = fetch_transactions(LEAGUE_ID, week)
@@ -232,19 +228,23 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
             return
 
         pickup_counts[team].append(player)
-        pickup_number = len(pickup_counts[team])
 
-        if pickup_number > 4:
-            suffix = "🚨🔥 **Limit surpassed!**"
-        elif pickup_number == 4:
-            suffix = "🚨 **Limit reached!**"
-        elif pickup_number == 3:
-            suffix = "⚠️ One pickup left this week."
-        else:
-            suffix = ""
+        delay = max(0, (pickup_time + timedelta(minutes = DROP_THRESHOLD_MIN) - now).total_seconds())
+        if delay > 0 or CATCHUP_MODE:
+            await asyncio.sleep(delay)
 
-        message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/4 this week\n{suffix}"
-        await safe_send(channel, message)
+            pickup_number = len(pickup_counts[team])
+            if pickup_number > 4:
+                suffix = "💀 **Limit surpassed!**"
+            elif pickup_number == 4:
+                suffix = "🚨 **Limit reached!**"
+            elif pickup_number == 3:
+                suffix = "⚠️ One pickup left this week."
+            else:
+                suffix = ""
+
+            message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/4 this week\n{suffix}"
+            await safe_send(channel, message)
     except Exception as e:
         print(f"Error in check_pickup: {e}")
 
