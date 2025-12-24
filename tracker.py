@@ -154,7 +154,7 @@ async def monitor_pickups():
             week = get_week_by_cutoff(START_DATE)
             
             if week != current_week:
-                await safe_send(channel, format_summary(current_week))
+                # await safe_send(channel, format_summary(current_week))
 
                 cutoff = datetime.now(timezone.utc) - timedelta(days=14)
                 
@@ -217,6 +217,10 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
     try:
         now = datetime.now(timezone.utc)
 
+        delay = max(0, (pickup_time+timedelta(minutes=DROP_THRESHOLD_MIN)-now).total_seconds())
+        if delay > 0:
+            await asyncio.sleep(delay)
+
         week = get_week_by_cutoff(START_DATE,pickup_time)
         transctions = fetch_transactions(LEAGUE_ID, week)
 
@@ -229,10 +233,7 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
 
         pickup_counts[team].append(player)
 
-        delay = max(0, (pickup_time + timedelta(minutes = DROP_THRESHOLD_MIN) - now).total_seconds())
         if delay > 0 or CATCHUP_MODE:
-            await asyncio.sleep(delay)
-
             pickup_number = len(pickup_counts[team])
             if pickup_number > 4:
                 suffix = "💀 **Limit surpassed!**"
