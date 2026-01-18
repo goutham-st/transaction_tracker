@@ -1,1 +1,3 @@
 .env
+.vscode/launch.json
+__pycache__/tracker.cpython-311.pyc
