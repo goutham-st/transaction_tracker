@@ -8,10 +8,10 @@ from dotenv import load_dotenv
 import os
 import sys
 from tracker import START_DATE, get_week_by_cutoff
-from statistics import mean,pstdev
-import pprint
+from statistics import pstdev
 import matplotlib.pyplot as plt
 import argparse
+from scipy import special
 
 load_dotenv()
 LEAGUE_ID = os.getenv("LEAGUE_ID")
@@ -26,6 +26,7 @@ LAST_WEEK = 21
 NUM_SIMS = 10000
 REGRESSION_FACTOR = 4
 TEAM_RATING_MAP = None
+WIN_PROB_MATRIX = None
 
 def get_roster_map(league_id):
     try:
@@ -47,7 +48,7 @@ def get_roster_map(league_id):
         actual_win_map = {}
         for roster in rosters:
             owner_id = roster.get('owner_id')
-            roster_id = roster.get('roster_id')
+            roster_id = str(roster.get('roster_id'))
             if owner_id in user_map:
                 roster_map[roster_id] = user_map[owner_id]['display_name']
                 settings = roster['settings']
@@ -204,101 +205,103 @@ def mathematically_eliminated(team, current_wins, remaining_games):
     # Eliminated if even max possible wins < current wins of 8th place
     return max_wins_team < eighth_place_wins
 
-def simulate_season(teams, schedule, actual_wins,scores):
-    playoff_counts = {team: 0 for team in teams}
-    seed_counts = {team: [0]*16 for team in teams}
-    final_wins_accumulator = {team: 0 for team in teams}
-    championship_counts = {team: 0 for team in teams}
-    finals_counts = {team: 0 for team in teams}
-    semis_counts = {team: 0 for team in teams}
-    toilet_counts = {team: 0 for team in teams}
+def simulate_season(teams_list, schedule, actual_wins,scores):
+    expected_wins_acc = np.zeros(len(teams_list), dtype=int)
+    seed_counts = np.zeros((len(teams_list),len(teams_list)), dtype=int)
+    playoff_counts = np.zeros(len(teams_list), dtype=int)
+    championship_counts = np.zeros(len(teams_list), dtype=int)
+    finals_counts = np.zeros(len(teams_list), dtype=int)
+    semis_counts = np.zeros(len(teams_list), dtype=int)
+    toilet_counts = np.zeros(len(teams_list), dtype=int)
+    tiebreak_arr = np.array([scores[team][0] for team in teams_list])
 
     for _ in range(NUM_SIMS):
 
-        standings = simulate_regular_season(teams, schedule, actual_wins)
+        standings = np.array([actual_wins[team] for team in teams_list], dtype=int)
+        
+        for i, j in schedule:
+            p = WIN_PROB_MATRIX[i, j]
+            winner = i if random() < p else j
+            standings[winner] += 1
 
-        for team,wins in standings.items():
-            final_wins_accumulator[team] += wins
-
-        # Apply tiebreakers and sort into final standings
-        final_order = sorted(standings.keys(), key=lambda x: (standings[x],scores[x][0]),reverse=True)
+        expected_wins_acc += standings
+        order_idx = np.lexsort((tiebreak_arr,standings))
+        order_idx = order_idx[::-1]
 
         # Record playoff appearances and seeds
-        for seed, team in enumerate(final_order):
-            seed_counts[team][seed] += 1
-            if seed < 8:
-                playoff_counts[team] += 1
+        for seed, team_idx in enumerate(order_idx):
+            seed_counts[team_idx,seed] += 1
+            if seed < 7:
+                playoff_counts[team_idx] += 1
 
-        simulate_playoffs(championship_counts, finals_counts, semis_counts, final_order)
-        simulate_toilet_bowl(toilet_counts, final_order)
+        simulate_playoffs(championship_counts, finals_counts, semis_counts, order_idx[:8])
+        simulate_toilet_bowl(toilet_counts, order_idx[8:])
 
-    return {
-        "playoff_odds": playoff_counts,
-        "seed_distribution": seed_counts,
-        "expected_final_wins": final_wins_accumulator,
-        "championship_odds": championship_counts,
-        "toilet_odds": toilet_counts
-    }
+    return playoff_counts, seed_counts, expected_wins_acc, championship_counts, toilet_counts
 
-def simulate_toilet_bowl(toilet_counts, final_order):
-    toilet_teams = final_order[8:]
+def simulate_toilet_bowl(toilet_counts, toilet_teams):
 
-    toilet_loser_1 = get_loser(toilet_teams[0],toilet_teams[-1])
-    toilet_loser_2 =  get_loser(toilet_teams[1],toilet_teams[-2])
-    toilet_loser_3 = get_loser(toilet_teams[2],toilet_teams[-3])
-    toilet_loser_4 = get_loser(toilet_teams[3],toilet_teams[-4])
+    wp = WIN_PROB_MATRIX
+    r = random
+    tt = toilet_teams
 
-    toilet_semi_1 = get_loser(toilet_loser_1,toilet_loser_4)
-    toilet_semi_2 = get_loser(toilet_loser_2,toilet_loser_3)
+    toilet_loser_1 = tt[-1] if r() < wp[tt[0],tt[-1]] else tt[0]
+    toilet_loser_2 = tt[-2] if r() < wp[tt[1],tt[-2]] else tt[1]
+    toilet_loser_3 = tt[-3] if r() < wp[tt[2],tt[-3]] else tt[2]
+    toilet_loser_4 = tt[-4] if r() < wp[tt[3],tt[-4]] else tt[3]
 
-    toilet_king = get_loser(toilet_semi_1,toilet_semi_2)
+    toilet_semi_1 = toilet_loser_4 if r() < wp[toilet_loser_1,toilet_loser_4] else toilet_loser_1
+    toilet_semi_2 = toilet_loser_3 if r() < wp[toilet_loser_2,toilet_loser_3] else toilet_loser_2
+
+    toilet_king = toilet_semi_2 if r() < wp[toilet_semi_1,toilet_semi_2] else toilet_semi_1
     toilet_counts[toilet_king] += 1
 
-def simulate_playoffs(championship_counts, finals_counts, semis_counts, final_order):
-    playoff_teams = final_order[:8]
+def simulate_playoffs(championship_counts, finals_counts, semis_counts, playoff_teams):
 
-    quarter_winner_1 = get_winner(playoff_teams[0],playoff_teams[-1])
+    wp = WIN_PROB_MATRIX
+    r = random
+    pt = playoff_teams
+
+    quarter_winner_1 = pt[0] if r() < wp[pt[0],pt[-1]] else pt[-1]
     semis_counts[quarter_winner_1] += 1
-    quarter_winner_2 =  get_winner(playoff_teams[1],playoff_teams[-2])
+    quarter_winner_2 =  pt[1] if r() < wp[pt[1],pt[-2]] else pt[-2]
     semis_counts[quarter_winner_2] += 1
-    quarter_winner_3 = get_winner(playoff_teams[2],playoff_teams[-3])
+    quarter_winner_3 = pt[2] if r() < wp[pt[2],pt[-3]] else pt[-3]
     semis_counts[quarter_winner_3] += 1
-    quarter_winner_4 = get_winner(playoff_teams[3],playoff_teams[-4])
+    quarter_winner_4 = pt[3] if r() < wp[pt[3],pt[-4]] else pt[-4]
     semis_counts[quarter_winner_4] += 1
 
-    semi_winner_1 = get_winner(quarter_winner_1,quarter_winner_4)
+    semi_winner_1 = quarter_winner_1 if r() < wp[quarter_winner_1,quarter_winner_4] else quarter_winner_4
     finals_counts[semi_winner_1] += 1
-    semi_winner_2 = get_winner(quarter_winner_2,quarter_winner_3)
+    semi_winner_2 = quarter_winner_2 if r() < wp[quarter_winner_2,quarter_winner_3] else quarter_winner_3
     finals_counts[semi_winner_2] += 1
 
-    champion = get_winner(semi_winner_1,semi_winner_2)
+    champion = semi_winner_1 if r() < wp[semi_winner_1,semi_winner_2] else semi_winner_2
     championship_counts[champion] += 1
 
-def simulate_regular_season(teams, schedule, actual_wins):
-    # 1. Copy current standings
-    standings = {team: actual_wins[team] for team in teams}
+# def simulate_regular_season(teams, schedule, actual_wins):
+#     # 1. Copy current standings
+#     standings = {team: actual_wins[team] for team in teams}
 
-    # 2. Simulate remaining games
-    for (A, B) in schedule:
-        standings[get_winner(A,B)] += 1
+#     # 2. Simulate remaining games
+#     for (A, B) in schedule:
+#         standings[get_winner(A,B)] += 1
 
-    return standings
+#     return standings
 
-def get_winner(A, B):
-    p = get_win_prob(A,B)
-    return A if random() < p else B
+# def get_winner(A, B):
+#     return A if random() < WIN_PROB_MATRIX[A,B] else B
 
-def get_loser(A, B):
-    p = get_win_prob(A,B)
-    return B if random() < p else A
+# def get_loser(A, B):
+#     return B if random() < WIN_PROB_MATRIX[A,B] else A
 
-def get_remaining_schedule(current_week,week_num=LAST_WEEK):
+def get_remaining_schedule(current_week,team_index,week_num=LAST_WEEK):
     remaining_schedule = []
     matchup_map = defaultdict(list)
 
     for i in range(current_week,week_num+1):
         for team in fetch_matchups(LEAGUE_ID, i):
-            matchup_map[team['matchup_id']].append(team['roster_id'])
+            matchup_map[team['matchup_id']].append(team_index[str(team['roster_id'])])
         remaining_schedule.extend([matchup for matchup in matchup_map.values()])
         matchup_map.clear()
 
@@ -316,6 +319,7 @@ def playoff_odds_report(completed_weeks, rosters, actual_wins, playoff_appearanc
 def main():
 
     global TEAM_RATING_MAP
+    global WIN_PROB_MATRIX
 
     parser = argparse.ArgumentParser(description="League Analytics")
 
@@ -369,47 +373,33 @@ def main():
         }
         plot_rating_versus_luck(rosters, luck, power_ranking_map)
 
-    if args.simulate_season:
-        remaining_schedule = get_remaining_schedule(current_week)
-        results = simulate_season(rosters, remaining_schedule, actual_wins, scores)
+    teams_list = sorted(TEAM_RATING_MAP.keys(), key=int)
+    team_index = {team: i for i, team in enumerate(teams_list)}
+    ratings = np.array([TEAM_RATING_MAP[team] for team in teams_list])
 
-        for result_type,result in results.items():
-            print(result_type)
-            if result_type == "playoff_odds":
-                playoff_odds = {
-                    rosters[key] : val / 10000 
-                    for key,val in result.items()
-                }
-                pprint.pprint(playoff_odds)
-            elif result_type == "seed_distribution":
-                seed_distribution = {
-                    rosters[key] : [x/10000 for x in val] 
-                    for key,val in result.items()
-                }
-                plot_seed_heatmap(seed_distribution)
-            elif result_type == "expected_final_wins":
-                expected_final_wins = {
-                    rosters[key] : val / 10000 
-                    for key,val in result.items()
-                }
-                pprint.pprint(expected_final_wins)
-            elif result_type == "championship_odds":
-                championship_odds = {
-                    rosters[key] : val / 10000 
-                    for key,val in result.items()
-                }
-                pprint.pprint(championship_odds)
-            elif result_type == "toilet_odds":
-                toilet_odds = {
-                    rosters[key] : val / 10000 
-                    for key,val in result.items()
-                }
-                pprint.pprint(toilet_odds)
+    diff = ratings[:, None] - ratings[None, :]
+    z = diff / math.sqrt(2)
+    WIN_PROB_MATRIX = 0.5 * (1 + special.erf(z / math.sqrt(2)))
+
+    if args.simulate_season:
+        remaining_schedule = get_remaining_schedule(current_week, team_index)
+        playoff_counts, seed_counts, expected_wins_acc, championship_odds, toilet_odds = simulate_season(teams_list, remaining_schedule, actual_wins, scores)
+
+        seed_distribution = {}
+
+        for i, team in enumerate(teams_list):
+            print(f"Team {rosters[team]}: expected wins = {expected_wins_acc[i] / NUM_SIMS:.3f}")
+            print(f"Team {rosters[team]}: playoff probability = {playoff_counts[i] / NUM_SIMS:.3f}")
+            print(f"Team {rosters[team]}: championship odds = {championship_odds[i] / NUM_SIMS:.3f}")
+            print(f"Team {rosters[team]}: toilet odds = {toilet_odds[i] / NUM_SIMS:.3f}")
             print("\n")
+            seed_distribution[rosters[team]] = seed_counts[i] / NUM_SIMS
+            
+        plot_seed_heatmap(seed_distribution)
 
     if args.current_week_probs:
-        remaining_schedule = get_remaining_schedule(current_week,current_week)
-        print_week_win_probs(remaining_schedule,rosters,current_week)
+        remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
+        print_week_win_probs(remaining_schedule,rosters,current_week,teams_list)
 
 def plot_seed_heatmap(seed_map):
     teams = list(seed_map.keys())
@@ -450,7 +440,7 @@ def print_power_rankings(power_ranking_map, rosters, week, prev_power_ranking_ma
         prev_pos = {}
 
     for idx, (team_id, _) in enumerate(current_sorted, start=1):
-        name = rosters[int(team_id)]
+        name = rosters[team_id]
 
         # compute delta
         if team_id in prev_pos:
@@ -465,18 +455,18 @@ def delta_emoji(delta):
     else:
         return "➖"
 
-def print_week_win_probs(matchups, rosters, week):
+def print_week_win_probs(matchups, rosters, week, team_list):
     print(f"\033[4mWin Probabilities - Week {week}\033[0m\n")
 
-    for idx, (A, B) in enumerate(matchups, start=1):
-        pA = get_win_prob(A, B)
+    for i, j in matchups:
+        pA = WIN_PROB_MATRIX[i,j]
         pB = 1 - pA
 
-        nameA = rosters[int(A)]
-        nameB = rosters[int(B)]
+        nameA = rosters[team_list[i]]
+        nameB = rosters[team_list[j]]
 
-        print(f"{idx:>2}. {nameA} vs {nameB}")
-        print(f"    {matchup_line(pA, pB, nameA, nameB)}")
+        print(f"{nameA} vs {nameB}")
+        print(f"    {matchup_line(pA, pB, nameA, nameB)}\n")
 
 def matchup_line(pA, pB, nameA, nameB):
     if abs(pA - pB) < 0.005:
