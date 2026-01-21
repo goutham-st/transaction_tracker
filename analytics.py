@@ -25,9 +25,8 @@ ALPHA = 0.75
 LAST_WEEK = 21
 NUM_SIMS = 10000
 REGRESSION_FACTOR = 1
-CURR_TEAM_RATING_MAP = None
-WIN_PROB_MATRIX = None
-k = 1.12
+CURR_WIN_PROB_MATRIX = None
+SLOPE = 1.12
 
 def get_roster_map(league_id):
     try:
@@ -103,16 +102,13 @@ def get_weekly_arrays(team_history, completed_weeks):
     ewtd_normalized = {team : (ewtd_t - completed_weeks / 2) / (pstdev(ewtd.values())) 
                        for team, ewtd_t in ewtd.items()}
     
-    raw_weights = [GAMMA ** (completed_weeks - 1 - i) for i in range(completed_weeks)]
-    # normalize weights so they sum to 1
-    total = sum(raw_weights)
-    weights = [w / total for w in raw_weights]
+    weights = get_recency_weights(completed_weeks)
 
     power_ranking_map = {}
     team_rating_map = {}
 
     for team,z_list in weekly_z.items():
-        team_rating = sum(v * w for v, w in zip(z_list, weights)) * completed_weeks / (completed_weeks + REGRESSION_FACTOR)
+        team_rating = get_rating(completed_weeks,weights,z_list)
         team_rating_map[team] = team_rating
         power_ranking_map[team] = ALPHA*team_rating + (1-ALPHA)*ewtd_normalized[team]
 
@@ -140,48 +136,6 @@ def plot_rating_versus_luck(rosters, luck, ratings):
     plt.grid(True, linestyle='--', alpha=0.3)
     plt.show()
 
-def mathematically_clinched(team, current_wins, remaining_games):
-
-    # Compute max possible wins for every team
-    max_wins = {
-        t: current_wins[t] + remaining_games
-        for t in current_wins.keys()
-    }
-
-    # Sort teams by current wins (descending)
-    sorted_teams = sorted(current_wins.keys(), key=lambda t: current_wins[t], reverse=True)
-
-    # Identify the 9th-place team (first team OUT of playoffs)
-    # If fewer than 9 teams exist, adjust accordingly
-    if len(sorted_teams) > 8:
-        ninth_place_team = sorted_teams[8]
-        ninth_place_max = max_wins[ninth_place_team]
-    else:
-        # If fewer than 9 teams, nobody can be "out"
-        return False
-
-    # Team clinches if its MIN possible wins > MAX possible wins of 9th place
-    if current_wins[team] > ninth_place_max:
-        return True
-
-    return False
-
-def mathematically_eliminated(team, current_wins, remaining_games):
-    max_wins_team = current_wins[team] + remaining_games
-
-    # Sort by current wins (desc)
-    sorted_teams = sorted(current_wins.keys(), key=lambda t: current_wins[t], reverse=True)
-
-    # 8th place team (last team IN)
-    if len(sorted_teams) < 8:
-        return False  # trivial case, not your league
-
-    eighth_place_team = sorted_teams[7]
-    eighth_place_wins = current_wins[eighth_place_team]
-
-    # Eliminated if even max possible wins < current wins of 8th place
-    return max_wins_team < eighth_place_wins
-
 def simulate_season(teams_list, schedule, actual_wins,scores):
     expected_wins_acc = np.zeros(len(teams_list), dtype=int)
     seed_counts = np.zeros((len(teams_list),len(teams_list)), dtype=int)
@@ -197,7 +151,7 @@ def simulate_season(teams_list, schedule, actual_wins,scores):
         standings = np.array([actual_wins[team] for team in teams_list], dtype=int)
         
         for i, j in schedule:
-            p = WIN_PROB_MATRIX[i, j]
+            p = CURR_WIN_PROB_MATRIX[i, j]
             winner = i if random() < p else j
             standings[winner] += 1
 
@@ -217,8 +171,7 @@ def simulate_season(teams_list, schedule, actual_wins,scores):
     return playoff_counts, seed_counts, expected_wins_acc, championship_counts, toilet_counts
 
 def simulate_toilet_bowl(toilet_counts, toilet_teams):
-
-    wp = WIN_PROB_MATRIX
+    wp = CURR_WIN_PROB_MATRIX
     r = random
     tt = toilet_teams
 
@@ -234,8 +187,7 @@ def simulate_toilet_bowl(toilet_counts, toilet_teams):
     toilet_counts[toilet_king] += 1
 
 def simulate_playoffs(championship_counts, finals_counts, semis_counts, playoff_teams):
-
-    wp = WIN_PROB_MATRIX
+    wp = CURR_WIN_PROB_MATRIX
     r = random
     pt = playoff_teams
 
@@ -268,19 +220,9 @@ def get_remaining_schedule(current_week,team_index,week_num=LAST_WEEK):
 
     return remaining_schedule
 
-def playoff_odds_report(completed_weeks, rosters, actual_wins, playoff_appearances):
-    for key,value in playoff_appearances.items():
-        if value == NUM_SIMS and not mathematically_clinched(key,actual_wins,LAST_WEEK-completed_weeks):
-            value = NUM_SIMS-1
-        elif value == 0 and not mathematically_eliminated(key,actual_wins,LAST_WEEK-completed_weeks):
-            value = 1
-
-        print(f"{rosters[key]}: {100*value/NUM_SIMS}%")
-
 def main():
 
-    global CURR_TEAM_RATING_MAP
-    global WIN_PROB_MATRIX
+    global CURR_WIN_PROB_MATRIX
 
     parser = argparse.ArgumentParser(description="League Analytics")
 
@@ -340,55 +282,50 @@ def main():
         wpm_map = {}
         weekly_z = defaultdict(list)
 
-        for week in range(1, completed_weeks):
+        # Weeks 2..13 are predictable using ratings from 1..12
+        for week in range(1, current_week):
+            
             rating_map = get_weekly_arrays_for_week(team_history, weekly_z, week)
             ratings = np.array([rating_map[team] for team in teams_list])
             diff = ratings[:, None] - ratings[None, :]
             z = diff / math.sqrt(2)
-            wpm = 0.5 * (1 + special.erf(k*z / math.sqrt(2)))
+            wpm = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
             wpm_map[week] = wpm
 
-        historical_games = {}
+            if week >= 2:
+                matchup_map = defaultdict(list)
+                for team in fetch_matchups(LEAGUE_ID, week):
+                    matchup_map[team['matchup_id']].append(team_index[str(team['roster_id'])])
+                games = list(matchup_map.values())          # predict Week N+1
 
-        for i in range(2, current_week):
-            matchup_map = defaultdict(list)
-            for team in fetch_matchups(LEAGUE_ID, i):
-                matchup_map[team['matchup_id']].append(team_index[str(team['roster_id'])])
-            historical_games[i] = [matchup for matchup in matchup_map.values()]
+                wpm = wpm_map[week - 1]  # ratings BEFORE the game
+                week_data = team_history[str(week)]
+                            
+                for i, j in games:
+                    # predicted probability at the time
+                    p = wpm[i,j]
 
-        # Weeks 2..13 are predictable using ratings from 1..12
-        for week in range(2, current_week):
-            
-            wpm = wpm_map[week - 1]  # ratings BEFORE the game
-            week_data = team_history[str(week)]
-                        
-            games = historical_games[week]          # predict Week N+1
+                    pfA = week_data[teams_list[i]]['pf']
+                    pfB = week_data[teams_list[j]]['pf']
 
-            for i, j in games:
-                # predicted probability at the time
-                p = wpm[i,j]
+                    # actual outcome
+                    actual = 1 if pfA > pfB else 0 
 
-                pfA = week_data[teams_list[i]]['pf']
-                pfB = week_data[teams_list[j]]['pf']
+                    # accuracy
+                    pred_winner = i if p >= 0.5 else j
+                    actual_winner = i if actual == 1 else j
+                    if pred_winner == actual_winner:
+                        bt_correct += 1
+                    bt_total += 1
 
-                # actual outcome
-                actual = 1 if pfA > pfB else 0 
+                    # Brier contribution
+                    bt_brier += (p - actual)**2
 
-                # accuracy
-                pred_winner = i if p >= 0.5 else j
-                actual_winner = i if actual == 1 else j
-                if pred_winner == actual_winner:
-                    bt_correct += 1
-                bt_total += 1
-
-                # Brier contribution
-                bt_brier += (p - actual)**2
-
-                # Bucket
-                for (low, high) in buckets:
-                    if low <= p < high:
-                        buckets[(low, high)].append(actual)
-                        break
+                    # Bucket
+                    for (low, high) in buckets:
+                        if low <= p < high:
+                            buckets[(low, high)].append(actual)
+                            break
 
         # final metrics
         bt_accuracy = bt_correct / bt_total
@@ -403,7 +340,7 @@ def main():
                 actual = sum(outcomes) / len(outcomes)
                 print(f"{low:.2f}-{high:.2f}: pred={predicted:.3f}, actual={actual:.3f}, n={len(outcomes)}")
         
-    power_ranking_map,CURR_TEAM_RATING_MAP,expected_wins = get_weekly_arrays(team_history, completed_weeks)
+    power_ranking_map,curr_team_rating_map,expected_wins = get_weekly_arrays(team_history, completed_weeks)
 
     if args.print_power_rankings:
         prev_week = str(completed_weeks - 1)
@@ -421,11 +358,11 @@ def main():
         }
         plot_rating_versus_luck(rosters, luck, power_ranking_map)
     
-    ratings = np.array([CURR_TEAM_RATING_MAP[team] for team in teams_list])
+    ratings = np.array([curr_team_rating_map[team] for team in teams_list])
 
     diff = ratings[:, None] - ratings[None, :]
     z = diff / math.sqrt(2)
-    WIN_PROB_MATRIX = 0.5 * (1 + special.erf(k*z / math.sqrt(2)))
+    CURR_WIN_PROB_MATRIX = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
 
     if args.simulate_season:
         remaining_schedule = get_remaining_schedule(current_week, team_index)
@@ -462,16 +399,23 @@ def get_weekly_arrays_for_week(team_history, weekly_z, week):
 
             # compute rating snapshot for this week
     n = week
-    raw_weights = [GAMMA ** (n - 1 - i) for i in range(n)]
-    total = sum(raw_weights)
-    weights = [w / total for w in raw_weights]
+    weights = get_recency_weights(n)
 
     rating_map = {}
     for team, z_list in weekly_z.items():
-        weighted = sum(v * w for v, w in zip(z_list, weights))
-        regressed = weighted * n / (n + REGRESSION_FACTOR)
-        rating_map[team] = regressed
+        rating_map[team] = get_rating(n, weights, z_list)
     return rating_map
+
+def get_rating(n, weights, z_list):
+    weighted = sum(v * w for v, w in zip(z_list, weights))
+    regressed = weighted * n / (n + REGRESSION_FACTOR)
+    return regressed
+
+def get_recency_weights(n):
+    raw_weights = [GAMMA ** (n - 1 - i) for i in range(n)]
+    total = sum(raw_weights)
+    weights = [w / total for w in raw_weights]
+    return weights
 
 def plot_seed_heatmap(seed_map):
     teams = list(seed_map.keys())
@@ -531,7 +475,7 @@ def print_week_win_probs(matchups, rosters, week, team_list):
     print(f"\033[4mWin Probabilities - Week {week}\033[0m\n")
 
     for i, j in matchups:
-        pA = WIN_PROB_MATRIX[i,j]
+        pA = CURR_WIN_PROB_MATRIX[i,j]
         pB = 1 - pA
 
         nameA = rosters[team_list[i]]
