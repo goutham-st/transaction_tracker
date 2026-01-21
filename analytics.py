@@ -286,10 +286,7 @@ def main():
         for week in range(1, current_week):
             
             rating_map = get_weekly_arrays_for_week(team_history, weekly_z, week)
-            ratings = np.array([rating_map[team] for team in teams_list])
-            diff = ratings[:, None] - ratings[None, :]
-            z = diff / math.sqrt(2)
-            wpm = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
+            wpm = get_wpm(teams_list, rating_map)
             wpm_map[week] = wpm
 
             if week >= 2:
@@ -358,11 +355,7 @@ def main():
         }
         plot_rating_versus_luck(rosters, luck, power_ranking_map)
     
-    ratings = np.array([curr_team_rating_map[team] for team in teams_list])
-
-    diff = ratings[:, None] - ratings[None, :]
-    z = diff / math.sqrt(2)
-    CURR_WIN_PROB_MATRIX = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
+    CURR_WIN_PROB_MATRIX = get_wpm(teams_list,curr_team_rating_map)
 
     if args.simulate_season:
         remaining_schedule = get_remaining_schedule(current_week, team_index)
@@ -383,6 +376,13 @@ def main():
     if args.current_week_probs:
         remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
         print_week_win_probs(remaining_schedule,rosters,current_week,teams_list)
+
+def get_wpm(teams_list, rating_map):
+    ratings = np.array([rating_map[team] for team in teams_list])
+    diff = ratings[:, None] - ratings[None, :]
+    z = diff / math.sqrt(2)
+    wpm = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
+    return wpm
 
 def get_weekly_arrays_for_week(team_history, weekly_z, week):
     week_data = team_history[str(week)]
