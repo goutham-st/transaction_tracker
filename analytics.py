@@ -258,6 +258,7 @@ def main():
     if args.update_week:
         if str(completed_weeks) not in team_history:        
             update_week_data(str(completed_weeks), scores, team_history)
+            print(f"Updated data for week {completed_weeks}")
         else:
             print("Data already up to date")
 
@@ -452,16 +453,46 @@ def print_power_rankings(power_ranking_map, rosters, week, prev_power_ranking_ma
             reverse=True
         )
         prev_pos = {team_id: idx for idx, (team_id, _) in enumerate(prev_sorted, start=1)}
+        prev_val = {team_id: val for team_id, val in prev_sorted}
     else:
         prev_pos = {}
+        prev_val = {}
 
-    for idx, (team_id, _) in enumerate(current_sorted, start=1):
+    value_deltas = {}
+    for idx, (team_id, value) in enumerate(current_sorted, start=1):
         name = rosters[team_id]
 
         # compute delta
         if team_id in prev_pos:
-            delta = prev_pos[team_id] - idx
-            print(f"{idx:>2}. {name:<22} {delta_emoji(delta)}")
+            delta_pos = prev_pos[team_id] - idx
+            pos_str = delta_emoji(delta_pos)
+        else:
+            pos_str = ""
+
+        if team_id in prev_val:
+            delta_val = value - prev_val[team_id]
+            value_deltas[team_id] = delta_val
+            delta_val_str = f"({delta_val:+.3f})"
+        else:
+            delta_val_str = ""
+
+        print(f"{idx:>2}. {name:<22} {pos_str:<2}  {value:>6.3f} {delta_val_str}")
+
+    if value_deltas:
+        # Sort by delta descending for risers
+        risers = sorted(value_deltas.items(), key=lambda x: x[1], reverse=True)[:3]
+        # Sort by delta ascending for fallers
+        fallers = sorted(value_deltas.items(), key=lambda x: x[1])[:3]
+
+        print("\nTop Risers:")
+        for team_id, delta in risers:
+            name = rosters[team_id]
+            print(f"  {name:<22} +{delta:.3f}")
+
+        print("\nTop Fallers:")
+        for team_id, delta in fallers:
+            name = rosters[team_id]
+            print(f"  {name:<22} {delta:.3f}")
 
 def delta_emoji(delta):
     if delta > 0:
@@ -469,7 +500,7 @@ def delta_emoji(delta):
     elif delta < 0:
         return f"🔴 ↓{-delta}"
     else:
-        return "➖"
+        return "➖   "
 
 def print_week_win_probs(matchups, rosters, week, team_list):
     print(f"\033[4mWin Probabilities - Week {week}\033[0m\n")
