@@ -126,9 +126,9 @@ def plot_rating_versus_luck(rosters, luck, ratings):
 def simulate_season(teams_list, schedule, actual_wins,scores):
     expected_wins_acc = np.zeros(len(teams_list), dtype=int)
     seed_counts = np.zeros((len(teams_list),len(teams_list)), dtype=int)
-    playoff_counts = np.zeros(len(teams_list), dtype=int)
     championship_counts = np.zeros(len(teams_list), dtype=int)
     finals_counts = np.zeros(len(teams_list), dtype=int)
+    # not currently being used
     semis_counts = np.zeros(len(teams_list), dtype=int)
     toilet_counts = np.zeros(len(teams_list), dtype=int)
     tiebreak_arr = np.array([scores[team][0] for team in teams_list])
@@ -146,16 +146,14 @@ def simulate_season(teams_list, schedule, actual_wins,scores):
         order_idx = np.lexsort((tiebreak_arr,standings))
         order_idx = order_idx[::-1]
 
-        # Record playoff appearances and seeds
+        # Record seeds
         for seed, team_idx in enumerate(order_idx):
             seed_counts[team_idx,seed] += 1
-            if seed < 7:
-                playoff_counts[team_idx] += 1
 
         simulate_playoffs(championship_counts, finals_counts, semis_counts, order_idx[:8])
         simulate_toilet_bowl(toilet_counts, order_idx[8:])
 
-    return playoff_counts, seed_counts, expected_wins_acc, championship_counts, toilet_counts
+    return seed_counts, expected_wins_acc, championship_counts, toilet_counts
 
 def simulate_toilet_bowl(toilet_counts, toilet_teams):
     wp = CURR_WIN_PROB_MATRIX
@@ -407,14 +405,15 @@ def main():
 
     if args.simulate_season:
         remaining_schedule = get_remaining_schedule(current_week, team_index)
-        playoff_counts, seed_counts, expected_wins_acc, championship_odds, toilet_odds = simulate_season(teams_list, remaining_schedule, actual_wins, scores)
+        seed_counts, expected_wins_acc, championship_odds, toilet_odds = simulate_season(teams_list, remaining_schedule, actual_wins, scores)
 
         seed_distribution = {}
 
         for i, team in enumerate(teams_list):
             print(f"Team {rosters[team]}: expected wins = {expected_wins_acc[i] / NUM_SIMS:.3f}")
-            print(f"Team {rosters[team]}: playoff probability = {playoff_counts[i] / NUM_SIMS:.3f}")
+            print(f"Team {rosters[team]}: playoff probability = {np.sum(seed_counts[i,:8]) / NUM_SIMS:.3f}")
             print(f"Team {rosters[team]}: championship odds = {championship_odds[i] / NUM_SIMS:.3f}")
+            print(f"Team {rosters[team]}: last place odds = {seed_counts[i,-1] / NUM_SIMS:.3f}")
             print(f"Team {rosters[team]}: toilet odds = {toilet_odds[i] / NUM_SIMS:.3f}")
             print("\n")
             seed_distribution[rosters[team]] = seed_counts[i] / NUM_SIMS
