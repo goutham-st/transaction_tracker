@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import os
 import sys
 from tracker import START_DATE, get_week_by_cutoff
-from statistics import pstdev
+from statistics import pstdev,mean
 import matplotlib.pyplot as plt
 import argparse
 from scipy import special
@@ -76,7 +76,7 @@ def load_team_history(path):
 def get_weekly_arrays(team_history, completed_weeks):
     completed_weeks = int(completed_weeks)
     weekly_z = defaultdict(list)
-    ewtd = defaultdict(float)
+    ewtd = defaultdict(list)
 
     for team_data in team_history.values():
         team_ids = list(team_data.keys())
@@ -97,22 +97,9 @@ def get_weekly_arrays(team_history, completed_weeks):
 
         for team_id, z_val, rank in zip(team_ids, z, ranks):
             weekly_z[team_id].append(z_val)
-            ewtd[team_id] += rank / 15
+            ewtd[team_id].append(rank / 15)
 
-    ewtd_normalized = {team : (ewtd_t - completed_weeks / 2) / (pstdev(ewtd.values())) 
-                       for team, ewtd_t in ewtd.items()}
-    
-    weights = get_recency_weights(completed_weeks)
-
-    power_ranking_map = {}
-    team_rating_map = {}
-
-    for team,z_list in weekly_z.items():
-        team_rating = get_rating(completed_weeks,weights,z_list)
-        team_rating_map[team] = team_rating
-        power_ranking_map[team] = ALPHA*team_rating + (1-ALPHA)*ewtd_normalized[team]
-
-    return power_ranking_map, team_rating_map, ewtd
+    return weekly_z, ewtd
 
 def save_team_history(path, team_history):
     with open(path, "w") as f:
@@ -243,6 +230,18 @@ def main():
     
     parser.add_argument("--backtesting", action="store_true",
                         help="Perform backtesting")
+    
+    parser.add_argument("--momentum", action="store_true",
+                        help="Get momentum using last 3 weeks")
+    
+    parser.add_argument("--parity", action="store_true",
+                        help="Get league parity")
+    
+    parser.add_argument("--strength-of-schedule", action="store_true",
+                        help="Get average rating of remaining opponents")
+    
+    parser.add_argument("--versus-median", action="store_true",
+                        help="Get team records if vs. median")
 
     args = parser.parse_args()
 
@@ -267,8 +266,7 @@ def main():
 
     if args.backtesting:
         
-        bt_correct = 0
-        bt_total = 0
+        bt_correct = bt_total = total_underdog_games = upsets = 0
         bt_brier = 0.0
 
         buckets = {
@@ -316,6 +314,11 @@ def main():
                         bt_correct += 1
                     bt_total += 1
 
+                    if p < 0.5:
+                        total_underdog_games += 1
+                        if actual_winner == i:
+                            upsets += 1
+
                     # Brier contribution
                     bt_brier += (p - actual)**2
 
@@ -337,21 +340,65 @@ def main():
                 predicted = (low + high) / 2
                 actual = sum(outcomes) / len(outcomes)
                 print(f"{low:.2f}-{high:.2f}: pred={predicted:.3f}, actual={actual:.3f}, n={len(outcomes)}")
+
+        if total_underdog_games > 0:
+            upset_frequency = upsets / total_underdog_games
+        else:
+            upset_frequency = 0
+
+        print("Upset frequency:", upset_frequency)
         
-    power_ranking_map,curr_team_rating_map,expected_wins = get_weekly_arrays(team_history, completed_weeks)
+    weekly_z, ewtd = get_weekly_arrays(team_history, completed_weeks)
+
+    if args.versus_median:
+        median_wins = {rosters[team] : sum(1 for win in wins if win > 0.5) + actual_wins[team] for team, wins in ewtd.items()}
+        median_wins_sorted = sorted(median_wins.items(), key=lambda x:x[1], reverse=True)
+        for i,(team, wins) in enumerate(median_wins_sorted,start=1):
+            print(f"{i}. {team}: {wins}-{completed_weeks*2-wins}")
+        
+    if args.momentum:
+        # consider weighting mean
+        momentum = {rosters[team] : mean(z_scores[-3:]) 
+                    for team,z_scores in weekly_z.items()}
+        
+        momentum_sorted = sorted(momentum.items(),
+                                 key=lambda x:x[1],
+                                 reverse=True)
+
+        for team, m in momentum_sorted:
+            print(f"{team}: {m}")
+
+    power_ranking_map, curr_team_rating_map = get_rating_maps(completed_weeks, weekly_z, ewtd)
+
+    if args.strength_of_schedule:
+        remaining_schedule = get_remaining_schedule(current_week, team_index)
+        opp_ratings = defaultdict(list)
+
+        for i, j in remaining_schedule:
+            opp_ratings[rosters[teams_list[i]]].append(curr_team_rating_map[teams_list[j]])
+            opp_ratings[rosters[teams_list[j]]].append(curr_team_rating_map[teams_list[i]])
+
+        avg_opp_rating = {team : mean(opp_ratings) for team, opp_ratings in opp_ratings.items()}
+        avg_opp_rating_sorted = sorted(avg_opp_rating.items(),key=lambda x:x[1],reverse=True)
+        for team,sos in avg_opp_rating_sorted:
+            print(f"{team}: {sos}")
+
+    if args.parity:
+        parity_index = np.std(list(curr_team_rating_map.values()))
+        print(f"Parity: {parity_index}")
 
     if args.print_power_rankings:
-        prev_week = str(completed_weeks - 1)
-        prev_power_ranking_map = None
-        if prev_week in team_history:
-            prev_power_ranking_map, _, _ = get_weekly_arrays(
-                {k: v for k, v in team_history.items() if int(k) <= completed_weeks - 1}, prev_week
-            )
+        prev_week = completed_weeks - 1
+        prev_weekly_z = {k: v[:-1] for k, v in weekly_z.items()}
+        prev_ewtd = {k: v[:-1] for k, v in ewtd.items()}
+        
+        prev_power_ranking_map, _ = get_rating_maps(prev_week, prev_weekly_z, prev_ewtd)
+
         print_power_rankings(power_ranking_map,rosters,current_week,prev_power_ranking_map)
 
     if args.plot_luck:
         luck = {
-            key: actual_wins[key] - expected_wins[str(key)]
+            key: actual_wins[key] - sum(ewtd[str(key)])
             for key in actual_wins
         }
         plot_rating_versus_luck(rosters, luck, power_ranking_map)
@@ -377,6 +424,24 @@ def main():
     if args.current_week_probs:
         remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
         print_week_win_probs(remaining_schedule,rosters,current_week,teams_list)
+
+def get_rating_maps(completed_weeks, weekly_z, ewtd):
+    
+    total_ewtd = {team : sum(ew) for team, ew in ewtd.items()}
+    ewtd_normalized = {team : (ewtd_t - completed_weeks / 2) / (pstdev(total_ewtd.values())) 
+                       for team, ewtd_t in total_ewtd.items()}
+    
+    weights = get_recency_weights(completed_weeks)
+
+    power_ranking_map = {}
+    curr_team_rating_map = {}
+
+    for team,z_list in weekly_z.items():
+        team_rating = get_rating(completed_weeks,weights,z_list)
+        curr_team_rating_map[team] = team_rating
+        power_ranking_map[team] = ALPHA*team_rating + (1-ALPHA)*ewtd_normalized[team]
+
+    return power_ranking_map,curr_team_rating_map
 
 def get_wpm(teams_list, rating_map):
     ratings = np.array([rating_map[team] for team in teams_list])
