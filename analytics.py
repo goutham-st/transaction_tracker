@@ -243,6 +243,10 @@ def main():
 
     args = parser.parse_args()
 
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr) # Print the help message to standard error
+        sys.exit(1) # Exit with an error code
+
     # Load shared data
 
     current_week = get_week_by_cutoff(START_DATE)
@@ -363,8 +367,13 @@ def main():
                                  key=lambda x:x[1],
                                  reverse=True)
 
-        for team, m in momentum_sorted:
-            print(f"{team}: {m}")
+        print(f"\033[4mHottest Teams\033[0m")
+        for team, _ in momentum_sorted[:3]:
+            print(team)        
+
+        print(f"\033[4mColdest Teams\033[0m")
+        for team, _ in momentum_sorted[-3:][::-1]:
+            print(team)
 
     power_ranking_map, curr_team_rating_map = get_rating_maps(completed_weeks, weekly_z, ewtd)
 
@@ -378,8 +387,14 @@ def main():
 
         avg_opp_rating = {team : mean(opp_ratings) for team, opp_ratings in opp_ratings.items()}
         avg_opp_rating_sorted = sorted(avg_opp_rating.items(),key=lambda x:x[1],reverse=True)
-        for team,sos in avg_opp_rating_sorted:
-            print(f"{team}: {sos}")
+
+        lines = []
+        for idx, (team, sos) in enumerate(avg_opp_rating_sorted, start=1):
+            lines.append(f"{idx:>2}. {team:<22} {sos:>6.3f}")
+
+        print(f"\033[4mRemaining Strength of Schedule - Week {current_week}\033[0m\n")
+        output = "\n".join(lines)
+        print(output)
 
     if args.parity:
         parity_index = np.std(list(curr_team_rating_map.values()))
