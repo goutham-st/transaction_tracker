@@ -117,6 +117,16 @@ def fetch_transactions(league_id, week):
     except requests.RequestException as e:
         print(f"Error fetching transactions: {e}")
         return []
+    
+def fetch_sleeper_week():
+    url = f"https://api.sleeper.app/v1/state/nba"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"Error fetching transactions: {e}")
+        return []
 
 def format_summary(week):
     lines = [f"🏀 Weekly Pickup Summary (Week {week})\n"]
@@ -154,7 +164,6 @@ async def monitor_pickups():
             week = get_week_by_cutoff(START_DATE)
             
             if week != current_week:
-                # await safe_send(channel, format_summary(current_week))
 
                 cutoff = datetime.now(timezone.utc) - timedelta(days=14)
                 
@@ -188,8 +197,17 @@ async def monitor_pickups():
                             seen_transactions[tx_id] = add_time
 
             curr_transactions = fetch_transactions(LEAGUE_ID, week)
+
+            sleeper_week = fetch_sleeper_week()['display_week']
+
+            if week + 1 == sleeper_week:
+                curr_transactions += fetch_transactions(LEAGUE_ID, week + 1)
             
             for tx in reversed(curr_transactions):
+
+                if 'transaction_id' not in tx:
+                    continue
+
                 tx_id = tx['transaction_id']
 
                 if tx_id in seen_transactions:
