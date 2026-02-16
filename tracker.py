@@ -178,10 +178,6 @@ async def monitor_pickups():
                 print(f"New week detected. Resetting tracking for week {week}")
             
             window_start = START_DATE + timedelta(weeks=week-1)
-
-            if window_start < STARTUP:
-                window_start = STARTUP
-
             window_end = START_DATE + timedelta(weeks=week)
 
             if week > 1:
@@ -255,18 +251,19 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
 
         pickup_counts[team].append(player)
 
-        pickup_number = len(pickup_counts[team])
-        if pickup_number > 4:
-            suffix = "💀 **Limit surpassed!**"
-        elif pickup_number == 4:
-            suffix = "🚨 **Limit reached!**"
-        elif pickup_number == 3:
-            suffix = "⚠️ One pickup left this week."
-        else:
-            suffix = ""
+        if pickup_time >= STARTUP:
+            pickup_number = len(pickup_counts[team])
+            if pickup_number > 4:
+                suffix = "💀 **Limit surpassed!**"
+            elif pickup_number == 4:
+                suffix = "🚨 **Limit reached!**"
+            elif pickup_number == 3:
+                suffix = "⚠️ One pickup left this week."
+            else:
+                suffix = ""
 
-        message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/4 this week\n{suffix}"
-        await safe_send(channel, message)
+            message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/4 this week\n{suffix}"
+            await safe_send(channel, message)
     except Exception as e:
         print(f"Error in check_pickup: {e}")
 
