@@ -336,7 +336,7 @@ def main():
 
         print("Backtest accuracy:", bt_accuracy)
         print("Backtest Brier:", bt_brier_score)
-
+        print("Calibration buckets:")
         for (low, high), outcomes in buckets.items():
             if outcomes:
                 predicted = (low + high) / 2
@@ -355,6 +355,7 @@ def main():
     if args.versus_median:
         median_wins = {rosters[team] : sum(1 for win in wins if win > 0.5) + actual_wins[team] for team, wins in ewtd.items()}
         median_wins_sorted = sorted(median_wins.items(), key=lambda x:x[1], reverse=True)
+        print("Versus median record:")
         for i,(team, wins) in enumerate(median_wins_sorted,start=1):
             print(f"{i}. {team}: {wins}-{completed_weeks*2-wins}")
         
@@ -392,7 +393,7 @@ def main():
         for idx, (team, sos) in enumerate(avg_opp_rating_sorted, start=1):
             lines.append(f"{idx:>2}. {team:<22} {sos:>6.3f}")
 
-        print(f"\033[4mRemaining Strength of Schedule - Week {current_week}\033[0m\n")
+        print(f"\033[4mRemaining Strength of Schedule - Week {current_week}\033[0m")
         output = "\n".join(lines)
         print(output)
 
@@ -433,7 +434,7 @@ def main():
             print("\n")
             seed_distribution[rosters[team]] = seed_counts[i] / NUM_SIMS
             
-        plot_seed_heatmap(seed_distribution)
+        plot_seed_heatmap(seed_distribution,current_week)
 
     if args.current_week_probs:
         remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
@@ -497,7 +498,7 @@ def get_recency_weights(n):
     weights = [w / total for w in raw_weights]
     return weights
 
-def plot_seed_heatmap(seed_map):
+def plot_seed_heatmap(seed_map,current_week):
     teams = list(seed_map.keys())
     data = np.array([seed_map[t] for t in teams])
 
@@ -508,7 +509,7 @@ def plot_seed_heatmap(seed_map):
     plt.xticks(range(16), range(1, 17))
     plt.yticks(range(16), teams)
 
-    plt.title("Seed Distribution Heatmap")
+    plt.title(f"Seed Distribution Heatmap After Week {current_week}")
     plt.xlabel("Seed")
     plt.ylabel("Team")
     plt.tight_layout()
