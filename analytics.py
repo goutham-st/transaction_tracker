@@ -369,12 +369,12 @@ def main():
                                  reverse=True)
 
         print(f"\033[4mHottest Teams\033[0m")
-        for team, _ in momentum_sorted[:3]:
-            print(team)        
+        for team, m in momentum_sorted[:3]:
+            print(f"{team}: {m}")        
 
         print(f"\033[4mColdest Teams\033[0m")
-        for team, _ in momentum_sorted[-3:][::-1]:
-            print(team)
+        for team, m in momentum_sorted[-3:][::-1]:
+            print(f"{team}: {m}")
 
     power_ranking_map, curr_team_rating_map = get_rating_maps(completed_weeks, weekly_z, ewtd)
 
