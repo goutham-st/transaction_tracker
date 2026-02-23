@@ -180,28 +180,10 @@ async def monitor_pickups():
             window_start = START_DATE + timedelta(weeks=week-1)
             window_end = START_DATE + timedelta(weeks=week)
 
-            if week > 1:
-                last_week_transactions = fetch_transactions(LEAGUE_ID, week-1)
-                for tx in reversed(last_week_transactions):
+            curr_transactions = []
 
-                    tx_id = tx['transaction_id']
-
-                    if tx_id in seen_transactions:
-                        continue
-
-                    if tx['type'] == 'waiver' and tx['status'] == 'complete':
-                        add_time = datetime.fromtimestamp(tx['status_updated']/1000, timezone.utc)
-                        if window_start <= add_time <= window_end:
-                            [(player_id, roster_id)] = list(tx['adds'].items())
-                            asyncio.create_task(check_pickup(player_id,roster_id,add_time,channel))
-                            seen_transactions[tx_id] = add_time
-
-            curr_transactions = fetch_transactions(LEAGUE_ID, week)
-
-            sleeper_week = fetch_sleeper_week()['display_week']
-
-            if week + 1 == sleeper_week:
-                curr_transactions += fetch_transactions(LEAGUE_ID, week + 1)
+            for i in range(week-1,week+2):
+                curr_transactions += fetch_transactions(LEAGUE_ID,i)
             
             for tx in reversed(curr_transactions):
 
