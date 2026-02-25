@@ -509,7 +509,7 @@ def plot_seed_heatmap(seed_map,current_week):
     plt.xticks(range(16), range(1, 17))
     plt.yticks(range(16), teams)
 
-    plt.title(f"Seed Distribution Heatmap After Week {current_week}")
+    plt.title(f"Seed Distribution Heatmap Before Week {current_week}")
     plt.xlabel("Seed")
     plt.ylabel("Team")
     plt.tight_layout()

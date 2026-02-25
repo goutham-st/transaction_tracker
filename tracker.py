@@ -173,9 +173,9 @@ async def monitor_pickups():
                 }
 
                 pickup_counts.clear()
+                await safe_send(channel, f"Week {current_week} complete. Starting tracking for Week {week}")
                 current_week = week
                 refresh_caches()
-                print(f"New week detected. Resetting tracking for week {week}")
             
             window_start = START_DATE + timedelta(weeks=week-1)
             window_end = START_DATE + timedelta(weeks=week)
