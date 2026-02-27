@@ -200,7 +200,7 @@ def get_remaining_schedule(current_week,team_index,week_num=LAST_WEEK):
     for i in range(current_week,week_num+1):
         for team in fetch_matchups(LEAGUE_ID, i):
             matchup_map[team['matchup_id']].append(team_index[str(team['roster_id'])])
-        remaining_schedule.extend([matchup for matchup in matchup_map.values()])
+        remaining_schedule.extend(matchup_map.values())
         matchup_map.clear()
 
     return remaining_schedule

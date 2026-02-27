@@ -183,7 +183,7 @@ async def monitor_pickups():
             curr_transactions = []
 
             for i in range(week-1,week+2):
-                curr_transactions += fetch_transactions(LEAGUE_ID,i)
+                curr_transactions.extend(fetch_transactions(LEAGUE_ID,i))
             
             for tx in reversed(curr_transactions):
 
