@@ -173,7 +173,7 @@ async def monitor_pickups():
                 }
 
                 pickup_counts.clear()
-                await safe_send(channel, f"Week {current_week} complete. Starting tracking for Week {week}")
+                await safe_send(channel, f"Week {current_week} complete. Starting tracking for Week {week}.")
                 current_week = week
                 refresh_caches()
             
