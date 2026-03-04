@@ -498,8 +498,12 @@ def get_recency_weights(n):
     weights = [w / total for w in raw_weights]
     return weights
 
+def expected_seed(prob_array):
+    seeds = np.arange(1, len(prob_array) + 1)
+    return np.sum(prob_array * seeds)
+
 def plot_seed_heatmap(seed_map,current_week):
-    teams = list(seed_map.keys())
+    teams = sorted(seed_map.keys(), key=lambda team: expected_seed(seed_map[team]))
     data = np.array([seed_map[t] for t in teams])
 
     plt.figure(figsize=(12, 8))
