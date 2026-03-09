@@ -25,7 +25,8 @@ if not CHANNEL_NAME:
     print("ERROR: CHANNEL_NAME environment variable is not set!")
     sys.exit(1)
 
-START_DATE = datetime(2025, 10, 20, 8, tzinfo=timezone.utc)
+# TODO Don't hardcode DST
+START_DATE = datetime(2025, 10, 20, 7, tzinfo=timezone.utc)
 DROP_THRESHOLD_MIN = 5
 CHECK_INTERVAL_SEC = 60 
 STARTUP = datetime.now(timezone.utc) 
@@ -68,14 +69,15 @@ def get_week_by_cutoff(start_date, now=None):
         now = datetime.now(timezone.utc)
 
     # If it's Monday before 8 AM ET, treat it as part of the previous week
-    if now.weekday() == 0 and now.hour < 8:
+    # TODO Don't hardcode DST
+    if now.weekday() == 0 and now.hour < 7:
         now -= timedelta(days=1)
 
     days_since_monday = (now.weekday() + 7) % 7
 
     # Find the most recent end of the week
     last_monday = now - timedelta(days=days_since_monday)
-    last_monday = last_monday.replace(hour=8,minute=0,second=0,microsecond=0)
+    last_monday = last_monday.replace(hour=7,minute=0,second=0,microsecond=0)
     delta = last_monday - start_date
     return delta.days // 7 + 1
 
