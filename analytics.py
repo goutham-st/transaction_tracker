@@ -4,6 +4,7 @@ import math
 from random import random
 import numpy as np
 import requests
+import time
 from dotenv import load_dotenv
 import os
 import sys
@@ -27,16 +28,25 @@ NUM_SIMS = 10000
 REGRESSION_FACTOR = 1
 CURR_WIN_PROB_MATRIX = None
 SLOPE = 1.12
+session = requests.Session()
+session.headers["Connection"] = "close"
+CACHE_FILE = "matchups_cache.json"
+
+def fetch(url, retries=10):
+    i = 0
+    while i < retries:
+        try:
+            return session.get(url, timeout=10)
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError):
+            time.sleep(0.5 * (i + 1))
+            i += 1
+    raise RuntimeError(f"Failed after {retries} retries")
 
 def get_roster_map(league_id):
     try:
-        users_response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/users", timeout=10)
-        users_response.raise_for_status()
-        users = users_response.json()
-        
-        rosters_response = requests.get(f"https://api.sleeper.app/v1/league/{league_id}/rosters", timeout=10)
-        rosters_response.raise_for_status()
-        rosters = rosters_response.json()
+        users = fetch(f"https://api.sleeper.app/v1/league/{league_id}/users").json()   
+        rosters = fetch(f"https://api.sleeper.app/v1/league/{league_id}/rosters").json()
 
         user_map = {user['user_id']: {
             'display_name': user.get('display_name', 'Unknown'),
@@ -60,14 +70,38 @@ def get_roster_map(league_id):
         return {}
 
 def fetch_matchups(league_id, week):
-    url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{week}"
+    # Build a unique key for this request
+    key = f"{league_id}-{week}"
+
+    # Load cache if it exists
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            try:
+                cache = json.load(f)
+            except json.JSONDecodeError:
+                cache = {}
+    else:
+        cache = {}
+
+    # If we already have this entry, return it
+    if key in cache:
+        return cache[key]
+
+    # Otherwise fetch from API
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        url = f"https://api.sleeper.app/v1/league/{league_id}/matchups/{week}"
+        data = fetch(url).json()
     except requests.RequestException as e:
-        print(f"Error fetching transactions: {e}")
+        print(f"Error fetching matchups: {e}")
         return []
+
+    # Store in cache
+    cache[key] = data
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+    return data
+
 
 def load_team_history(path):
     with open(path, "r") as f:
@@ -123,7 +157,7 @@ def plot_rating_versus_luck(rosters, luck, ratings):
     plt.grid(True, linestyle='--', alpha=0.3)
     plt.show()
 
-def simulate_season(teams_list, schedule, actual_wins,scores):
+def simulate_season(teams_list, schedule, actual_wins,scores,playoffMode=False):
     expected_wins_acc = np.zeros(len(teams_list), dtype=int)
     seed_counts = np.zeros((len(teams_list),len(teams_list)), dtype=int)
     championship_counts = np.zeros(len(teams_list), dtype=int)
@@ -131,6 +165,8 @@ def simulate_season(teams_list, schedule, actual_wins,scores):
     # not currently being used
     semis_counts = np.zeros(len(teams_list), dtype=int)
     toilet_counts = np.zeros(len(teams_list), dtype=int)
+    finals_matchups = defaultdict(int)
+    toilet_matchups = defaultdict(int)
     tiebreak_arr = np.array([scores[team][0] for team in teams_list])
 
     for _ in range(NUM_SIMS):
@@ -150,39 +186,53 @@ def simulate_season(teams_list, schedule, actual_wins,scores):
         for seed, team_idx in enumerate(order_idx):
             seed_counts[team_idx,seed] += 1
 
-        simulate_playoffs(championship_counts, finals_counts, semis_counts, order_idx[:8])
-        simulate_toilet_bowl(toilet_counts, order_idx[8:])
+        simulate_playoffs(championship_counts, finals_counts, semis_counts, order_idx[:8], finals_matchups, playoffMode)
+        simulate_toilet_bowl(toilet_counts, order_idx[8:], toilet_matchups, playoffMode)
 
-    return seed_counts, expected_wins_acc, championship_counts, toilet_counts
+    return seed_counts, expected_wins_acc, championship_counts, toilet_counts, finals_matchups, toilet_matchups
 
-def simulate_toilet_bowl(toilet_counts, toilet_teams):
+def simulate_toilet_bowl(toilet_counts, toilet_teams, toilet_matchups, manual=True):
     wp = CURR_WIN_PROB_MATRIX
     r = random
     tt = toilet_teams
 
-    toilet_loser_1 = tt[-1] if r() < wp[tt[0],tt[-1]] else tt[0]
-    toilet_loser_2 = tt[-2] if r() < wp[tt[1],tt[-2]] else tt[1]
-    toilet_loser_3 = tt[-3] if r() < wp[tt[2],tt[-3]] else tt[2]
-    toilet_loser_4 = tt[-4] if r() < wp[tt[3],tt[-4]] else tt[3]
+    if not manual:
+        toilet_loser_1 = tt[-1] if r() < wp[tt[0],tt[-1]] else tt[0]
+        toilet_loser_2 = tt[-2] if r() < wp[tt[1],tt[-2]] else tt[1]
+        toilet_loser_3 = tt[-3] if r() < wp[tt[2],tt[-3]] else tt[2]
+        toilet_loser_4 = tt[-4] if r() < wp[tt[3],tt[-4]] else tt[3]
+    else:
+        toilet_loser_1 = tt[0]
+        toilet_loser_2 = tt[1]
+        toilet_loser_3 = tt[-3]
+        toilet_loser_4 = tt[-4]
 
     toilet_semi_1 = toilet_loser_4 if r() < wp[toilet_loser_1,toilet_loser_4] else toilet_loser_1
     toilet_semi_2 = toilet_loser_3 if r() < wp[toilet_loser_2,toilet_loser_3] else toilet_loser_2
 
+    toilet_matchups[frozenset((toilet_semi_1,toilet_semi_2))] += 1
     toilet_king = toilet_semi_2 if r() < wp[toilet_semi_1,toilet_semi_2] else toilet_semi_1
     toilet_counts[toilet_king] += 1
 
-def simulate_playoffs(championship_counts, finals_counts, semis_counts, playoff_teams):
+def simulate_playoffs(championship_counts, finals_counts, semis_counts, playoff_teams, finals_matchups, manual=True):
     wp = CURR_WIN_PROB_MATRIX
     r = random
     pt = playoff_teams
 
-    quarter_winner_1 = pt[0] if r() < wp[pt[0],pt[-1]] else pt[-1]
+    if not manual:
+        quarter_winner_1 = pt[0] if r() < wp[pt[0],pt[-1]] else pt[-1]
+        quarter_winner_2 = pt[1] if r() < wp[pt[1],pt[-2]] else pt[-2]
+        quarter_winner_3 = pt[2] if r() < wp[pt[2],pt[-3]] else pt[-3]
+        quarter_winner_4 = pt[3] if r() < wp[pt[3],pt[-4]] else pt[-4]
+    else:
+        quarter_winner_1 = pt[0]
+        quarter_winner_2 = pt[1]
+        quarter_winner_3 = pt[2]
+        quarter_winner_4 = pt[3]
+
     semis_counts[quarter_winner_1] += 1
-    quarter_winner_2 =  pt[1] if r() < wp[pt[1],pt[-2]] else pt[-2]
     semis_counts[quarter_winner_2] += 1
-    quarter_winner_3 = pt[2] if r() < wp[pt[2],pt[-3]] else pt[-3]
     semis_counts[quarter_winner_3] += 1
-    quarter_winner_4 = pt[3] if r() < wp[pt[3],pt[-4]] else pt[-4]
     semis_counts[quarter_winner_4] += 1
 
     semi_winner_1 = quarter_winner_1 if r() < wp[quarter_winner_1,quarter_winner_4] else quarter_winner_4
@@ -190,6 +240,7 @@ def simulate_playoffs(championship_counts, finals_counts, semis_counts, playoff_
     semi_winner_2 = quarter_winner_2 if r() < wp[quarter_winner_2,quarter_winner_3] else quarter_winner_3
     finals_counts[semi_winner_2] += 1
 
+    finals_matchups[frozenset((semi_winner_1,semi_winner_2))] += 1
     champion = semi_winner_1 if r() < wp[semi_winner_1,semi_winner_2] else semi_winner_2
     championship_counts[champion] += 1
 
@@ -258,7 +309,7 @@ def main():
 
     if args.update_week:
         if str(completed_weeks) not in team_history:        
-            update_week_data(str(completed_weeks), scores, team_history)
+            update_week_data(str(completed_weeks), scores, team_history, rosters)
             print(f"Updated data for week {completed_weeks}")
         else:
             print("Data already up to date")
@@ -283,7 +334,6 @@ def main():
         wpm_map = {}
         weekly_z = defaultdict(list)
 
-        # Weeks 2..13 are predictable using ratings from 1..12
         for week in range(1, current_week):
             
             rating_map = get_weekly_arrays_for_week(team_history, weekly_z, week)
@@ -327,7 +377,10 @@ def main():
                     # Bucket
                     for (low, high) in buckets:
                         if low <= p < high:
-                            buckets[(low, high)].append(actual)
+                            buckets[(low, high)].append((p,actual))
+                            break
+                        elif low <= 1 - p < high:
+                            buckets[(low, high)].append((1-p,1-actual))
                             break
 
         # final metrics
@@ -339,9 +392,9 @@ def main():
         print("Calibration buckets:")
         for (low, high), outcomes in buckets.items():
             if outcomes:
-                predicted = (low + high) / 2
-                actual = sum(outcomes) / len(outcomes)
-                print(f"{low:.2f}-{high:.2f}: pred={predicted:.3f}, actual={actual:.3f}, n={len(outcomes)}")
+               avg_pred = sum(q for q, _ in outcomes) / len(outcomes)
+               avg_actual = sum(a for _, a in outcomes) / len(outcomes)
+               print(f"{low:.2f}-{high:.2f}: pred={avg_pred:.3f}, actual={avg_actual:.3f}, n={len(outcomes)}")
 
         if total_underdog_games > 0:
             upset_frequency = upsets / total_underdog_games
@@ -421,20 +474,32 @@ def main():
 
     if args.simulate_season:
         remaining_schedule = get_remaining_schedule(current_week, team_index)
-        seed_counts, expected_wins_acc, championship_odds, toilet_odds = simulate_season(teams_list, remaining_schedule, actual_wins, scores)
+        seed_counts, expected_wins_acc, championship_odds, toilet_odds,finals_matchups,toilet_matchups = simulate_season(teams_list, remaining_schedule, actual_wins, scores, completed_weeks > LAST_WEEK)
+        champ_probs = championship_odds / NUM_SIMS
+        champ_sorted_idx = np.argsort(champ_probs)[::-1]
+        print("Championship Odds:")
+        for idx in champ_sorted_idx[:8]:
+            team_id = teams_list[idx]
+            team_name = rosters[team_id]
+            print(f"{team_name}: {champ_probs[idx]:.2%}")
 
-        seed_distribution = {}
+        toilet_probs = toilet_odds / NUM_SIMS
+        toilet_sorted_idx = np.argsort(toilet_probs)[::-1]
+        print("\nToilet Odds:")
+        for idx in toilet_sorted_idx[:8]:
+            team_id = teams_list[idx]
+            team_name = rosters[team_id]
+            print(f"{team_name}: {toilet_probs[idx]:.2%}")
 
-        for i, team in enumerate(teams_list):
-            print(f"Team {rosters[team]}: expected wins = {expected_wins_acc[i] / NUM_SIMS:.3f}")
-            print(f"Team {rosters[team]}: playoff probability = {np.sum(seed_counts[i,:8]) / NUM_SIMS:.3f}")
-            print(f"Team {rosters[team]}: championship odds = {championship_odds[i] / NUM_SIMS:.3f}")
-            print(f"Team {rosters[team]}: last place odds = {seed_counts[i,-1] / NUM_SIMS:.3f}")
-            print(f"Team {rosters[team]}: toilet odds = {toilet_odds[i] / NUM_SIMS:.3f}")
-            print("\n")
-            seed_distribution[rosters[team]] = seed_counts[i] / NUM_SIMS
-            
-        plot_seed_heatmap(seed_distribution,current_week)
+        # print("\nLikeliest Championship Matchups:")
+        # for pair, count in sorted(finals_matchups.items(), key=lambda x: x[1], reverse=True):
+        #     a, b = tuple(pair)
+        #     print(f"{rosters[teams_list[a]]} vs {rosters[teams_list[b]]}: {(count/NUM_SIMS):.2%}")
+
+        # print("\nLikeliest Toilet King Matchups:")
+        # for pair, count in sorted(toilet_matchups.items(), key=lambda x: x[1], reverse=True):
+        #     a, b = tuple(pair)
+        #     print(f"{rosters[teams_list[a]]} vs {rosters[teams_list[b]]}: {(count/NUM_SIMS):.2%}")
 
     if args.current_week_probs:
         remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
@@ -458,12 +523,25 @@ def get_rating_maps(completed_weeks, weekly_z, ewtd):
 
     return power_ranking_map,curr_team_rating_map
 
-def get_wpm(teams_list, rating_map):
+def get_wpm(teams_list, rating_map, platt_model=None):
     ratings = np.array([rating_map[team] for team in teams_list])
     diff = ratings[:, None] - ratings[None, :]
     z = diff / math.sqrt(2)
-    wpm = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
-    return wpm
+    base_wpm = 0.5 * (1 + special.erf(SLOPE*z / math.sqrt(2)))
+
+    if platt_model is None:
+        return base_wpm
+
+    calibrated = np.zeros_like(base_wpm)
+
+    flat = base_wpm.flatten()
+
+    flat = np.asarray(flat).reshape(-1, 1)
+    cal_flat = platt_model.predict_proba(flat)[:, 1]
+    calibrated = cal_flat.reshape(base_wpm.shape)
+
+    np.fill_diagonal(calibrated, 0.5)
+    return calibrated
 
 def get_weekly_arrays_for_week(team_history, weekly_z, week):
     week_data = team_history[str(week)]
@@ -608,17 +686,27 @@ def matchup_line(pA, pB, nameA, nameB):
     else:
         return f"{nameB} favored ({pB*100:.1f}% vs {pA*100:.1f}%)"
 
-def update_week_data(completed_weeks, scores, team_history):
+def update_week_data(completed_weeks, scores, team_history, rosters):
     new_data = {}
-    for team,(pf,pa,mpf) in scores.items():
-        pf_sum = pa_sum = mpf_sum = 0
+    for team,(pf,_,_) in scores.items():
+        pf_sum = 0
         for stats in team_history.values():
-            pf_sum += stats[team]['pf']
-            pa_sum += stats[team]['pa']
-            mpf_sum += stats[team]['mpf']
-        new_data[team] = {'pf' : pf - pf_sum, 
-                                    "pa" : pa - pa_sum, 
-                                    "mpf" : mpf - mpf_sum}
+            pf_sum += int(stats[team]['pf'])
+        if pf != pf_sum:
+            new_data[team] = {'pf' : pf - pf_sum}
+        else:
+            new_data = {}
+            for week in range(LAST_WEEK+1,int(completed_weeks)+1):
+                # Ask the user if they want to manually enter data
+                choice = input(f"Do you want to manually enter week {week} data? (yes/no): ").strip().lower()
+                if choice in ['yes','y']:                
+                    # Outer loop to repeat the prompt 16 times
+                    for id,name in rosters.items():
+                        # Inner loop to prompt for 3 values
+                        value = input(f"  Enter value for pf for {name}: ")
+                        new_data[id] = {'pf' : int(value)} 
+                    team_history[completed_weeks] = new_data
+            return
                 
     team_history[completed_weeks] = new_data
     save_team_history("weekly_data.json", team_history)
