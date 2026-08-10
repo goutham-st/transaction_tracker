@@ -116,7 +116,11 @@ def get_weekly_arrays(team_history, completed_weeks):
         team_ids = list(team_data.keys())
         scores = np.array([stats['pf'] for stats in team_data.values()],dtype=int)
         
-        z = (scores - scores.mean()) / scores.std()
+        std = scores.std()
+        if np.isclose(std, 0):
+            z = np.zeros_like(scores, dtype=float)
+        else:
+            z = (scores - scores.mean()) / std
         base_ranks = scores.argsort().argsort()
 
         _, inverse, counts = np.unique(scores, return_inverse=True, return_counts=True)
