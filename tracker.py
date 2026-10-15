@@ -29,6 +29,7 @@ if not CHANNEL_NAME:
 START_DATE = datetime(2025, 10, 20, 7, tzinfo=timezone.utc)
 DROP_THRESHOLD_MIN = 5
 CHECK_INTERVAL_SEC = 60 
+PICKUP_MAX = 3
 STARTUP = datetime.now(timezone.utc) 
 
 seen_transactions = {}
@@ -134,7 +135,7 @@ def format_summary(week):
     lines = [f"🏀 Weekly Pickup Summary (Week {week})\n"]
     for roster_id, player_names in pickup_counts.items():
         count = len(player_names)
-        status = "✅" if count <= 4 else "❌"
+        status = "✅" if count <= PICKUP_MAX else "❌"
         lines.append(f"{roster_id} — {count} pickup(s) {status}")
         for pname in player_names:
             lines.append(f"• {pname}")
@@ -237,16 +238,16 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
 
         if pickup_time >= STARTUP:
             pickup_number = len(pickup_counts[team])
-            if pickup_number > 4:
+            if pickup_number > PICKUP_MAX:
                 suffix = "💀 **Limit surpassed!**"
-            elif pickup_number == 4:
+            elif pickup_number == PICKUP_MAX:
                 suffix = "🚨 **Limit reached!**"
-            elif pickup_number == 3:
+            elif pickup_number == PICKUP_MAX - 1:
                 suffix = "⚠️ One pickup left this week."
             else:
                 suffix = ""
 
-            message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/4 this week\n{suffix}"
+            message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/{PICKUP_MAX} this week\n{suffix}"
             await safe_send(channel, message)
     except Exception as e:
         print(f"Error in check_pickup: {e}")
