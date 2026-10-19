@@ -6,7 +6,7 @@ This repository contains a Discord bot for monitoring Sleeper fantasy basketball
 ## Features
 - **!pickups Command**: Displays a formatted summary of pickups tracked for the current week
 - **Quick Drop Filter**: Ignores pickups where the player is dropped within 5 minutes
-- **Weekly Pickup Limits**: Tracks pickups per team and sends alerts when a roster reaches or exceeds its weekly limit of 4 pickups
+- **Weekly Pickup Limits**: Tracks pickups per team and sends alerts when a roster reaches or exceeds its weekly limit of 3 pickups
 - **Analytics CLI**: Includes a separate analytics workflow for weekly data updates, power rankings, simulations, backtesting, and other league insights
 - **Error Resilience**: Uses timeout protection and graceful error handling around Sleeper API calls
 
@@ -22,7 +22,8 @@ This repository contains a Discord bot for monitoring Sleeper fantasy basketball
 - `CHANNEL_NAME`: Discord channel where alerts are sent and commands are read from
 
 ### Key Configuration
-- `START_DATE`: October 20, 2025 07:00 UTC
+- Pickup schedule: Week 0 runs from October 12, 2026 at 3:00 AM Eastern to the October 20 opener at 3:00 PM Eastern; Week 1 starts at the opener and ends at the next Monday 3:00 AM Eastern cutoff
+- `START_DATE`: Legacy analytics week anchor used by `analytics.py`
 - `DROP_THRESHOLD_MIN`: 5 minutes; pickups dropped within this window are ignored
 - `CHECK_INTERVAL_SEC`: 60 seconds; how often the tracker polls Sleeper
 - `CACHE_FILE`: `matchups_cache.json` used by the analytics script
@@ -36,6 +37,7 @@ The analytics script supports several CLI modes, including:
 - `--print-power-rankings` to print current rankings
 - `--plot-luck` to visualize rating vs. luck
 - `--simulate-season` to run a season simulation
+- `--playoff-mode` to explicitly include playoff outcome simulation
 - `--backtesting` to evaluate forecast accuracy
 - `--momentum`, `--parity`, `--strength-of-schedule`, and `--versus-median` for additional analysis views
 

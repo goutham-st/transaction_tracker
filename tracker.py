@@ -1,9 +1,11 @@
 import discord
 import requests
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import os
 import asyncio
+import csv
 from asyncio import Semaphore
 from collections import defaultdict
 import sys
@@ -27,13 +29,18 @@ if not CHANNEL_NAME:
 
 # TODO Don't hardcode DST
 START_DATE = datetime(2025, 10, 20, 7, tzinfo=timezone.utc)
+EASTERN = ZoneInfo("America/New_York")
+WEEK0_START = datetime(2026, 10, 12, 3, tzinfo=EASTERN)
+SEASON_OPENER = datetime(2026, 10, 20, 15, tzinfo=EASTERN)
 DROP_THRESHOLD_MIN = 5
 CHECK_INTERVAL_SEC = 60 
 PICKUP_MAX = 3
 STARTUP = datetime.now(timezone.utc) 
+PICKUP_LOG_DIR = os.path.join(os.path.dirname(__file__), "pickup_logs")
 
 seen_transactions = {}
 pickup_counts = defaultdict(list)
+pickup_counts_by_week = defaultdict(lambda: defaultdict(list))
 player_map_cache = {}
 roster_map_cache = {}
 send_semaphore = Semaphore()
@@ -81,6 +88,57 @@ def get_week_by_cutoff(start_date, now=None):
     last_monday = last_monday.replace(hour=7,minute=0,second=0,microsecond=0)
     delta = last_monday - start_date
     return delta.days // 7 + 1
+
+def get_next_regular_cutoff(after):
+    local_after = after.astimezone(EASTERN)
+    days_until_monday = (7 - local_after.weekday()) % 7
+    cutoff = (local_after + timedelta(days=days_until_monday)).replace(
+        hour=3, minute=0, second=0, microsecond=0
+    )
+    if cutoff <= local_after:
+        cutoff += timedelta(days=7)
+    return cutoff
+
+FIRST_REGULAR_WEEK_START = get_next_regular_cutoff(SEASON_OPENER)
+
+def get_tracking_period(now=None):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    now = now.astimezone(EASTERN)
+
+    if now < WEEK0_START:
+        return None
+    if now < SEASON_OPENER:
+        return 0, WEEK0_START, SEASON_OPENER
+    if now < FIRST_REGULAR_WEEK_START:
+        return 1, SEASON_OPENER, FIRST_REGULAR_WEEK_START
+
+    week = 2
+    week_start = FIRST_REGULAR_WEEK_START
+    while now >= week_start + timedelta(days=7):
+        week += 1
+        week_start += timedelta(days=7)
+    return week, week_start, week_start + timedelta(days=7)
+
+def get_current_or_previous_period(timestamp, current_week):
+    period = get_tracking_period(timestamp)
+    if period is None or period[0] not in (current_week - 1, current_week):
+        return None
+    return period
+
+def get_sleeper_api_week(fallback_week):
+    state = fetch_sleeper_week()
+    if isinstance(state, dict):
+        week = state.get("week")
+        if isinstance(week, int) and week > 0:
+            return week
+    return max(1, fallback_week)
+
+def get_sleeper_api_weeks(tracking_week):
+    sleeper_week = get_sleeper_api_week(tracking_week)
+    api_weeks = set(range(max(1, sleeper_week - 1), sleeper_week + 2))
+    api_weeks.add(max(1, tracking_week - 1))
+    return sorted(api_weeks)
 
 def get_roster_map(league_id):
     try:
@@ -131,6 +189,48 @@ def fetch_sleeper_week():
         print(f"Error fetching transactions: {e}")
         return []
 
+def log_pickup(transaction_id, pickup_time, roster_id, team, player_id, player):
+    period = get_tracking_period(pickup_time)
+    if period is None:
+        return False
+    week, week_start, _ = period
+    season_name = f"{SEASON_OPENER.year}-{(SEASON_OPENER.year + 1) % 100:02d}"
+    season_log_dir = os.path.join(PICKUP_LOG_DIR, season_name)
+    os.makedirs(season_log_dir, exist_ok=True)
+    log_path = os.path.join(season_log_dir, f"pickups_week_{week:02d}.csv")
+
+    if os.path.exists(log_path):
+        with open(log_path, "r", newline="", encoding="utf-8") as handle:
+            if any(row.get("transaction_id") == transaction_id for row in csv.DictReader(handle)):
+                return False
+
+    fieldnames = [
+        "transaction_id",
+        "pickup_time_utc",
+        "week",
+        "week_start_utc",
+        "roster_id",
+        "team",
+        "player_id",
+        "player",
+    ]
+    write_header = not os.path.exists(log_path) or os.path.getsize(log_path) == 0
+    with open(log_path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            "transaction_id": transaction_id,
+            "pickup_time_utc": pickup_time.isoformat(),
+            "week": week,
+            "week_start_utc": week_start.astimezone(timezone.utc).isoformat(),
+            "roster_id": roster_id,
+            "team": team,
+            "player_id": player_id,
+            "player": player,
+        })
+    return True
+
 def format_summary(week):
     lines = [f"🏀 Weekly Pickup Summary (Week {week})\n"]
     for roster_id, player_names in pickup_counts.items():
@@ -141,6 +241,16 @@ def format_summary(week):
             lines.append(f"• {pname}")
         lines.append("")
     return "\n".join(lines)
+
+def record_pickup(week, team, player):
+    week_counts = pickup_counts_by_week[week]
+    week_counts[team].append(player)
+
+    current_period = get_tracking_period()
+    if current_period is not None and current_period[0] == week:
+        pickup_counts[team].append(player)
+
+    return len(week_counts[team])
 
 def refresh_caches():
     global player_map_cache, roster_map_cache
@@ -160,13 +270,21 @@ async def monitor_pickups():
     
     print(f"Monitoring pickups in #{channel.name}")
     refresh_caches()
-    current_week = get_week_by_cutoff(START_DATE)
+    current_period = get_tracking_period()
+    current_week = current_period[0] if current_period else None
     
     while not client.is_closed():
         try:            
-            week = get_week_by_cutoff(START_DATE)
+            period = get_tracking_period()
+            if period is None:
+                await asyncio.sleep(CHECK_INTERVAL_SEC)
+                continue
+            week = period[0]
             
-            if week != current_week:
+            if current_week is None:
+                current_week = week
+                refresh_caches()
+            elif week != current_week:
 
                 cutoff = datetime.now(timezone.utc) - timedelta(days=14)
                 
@@ -180,15 +298,14 @@ async def monitor_pickups():
                 current_week = week
                 refresh_caches()
             
-            window_start = START_DATE + timedelta(weeks=week-1)
-            window_end = START_DATE + timedelta(weeks=week)
-
             curr_transactions = []
-
-            for i in range(week-1,week+2):
-                curr_transactions.extend(fetch_transactions(LEAGUE_ID,i))
+            api_weeks = get_sleeper_api_weeks(week)
+            for api_week in api_weeks:
+                curr_transactions.extend(
+                    (tx, api_week) for tx in fetch_transactions(LEAGUE_ID, api_week)
+                )
             
-            for tx in reversed(curr_transactions):
+            for tx, api_week in reversed(curr_transactions):
 
                 if 'transaction_id' not in tx:
                     continue
@@ -206,9 +323,12 @@ async def monitor_pickups():
 
                 add_time = datetime.fromtimestamp(tx['status_updated']/1000, timezone.utc)
                 
-                if window_start <= add_time <= window_end:
+                transaction_period = get_current_or_previous_period(add_time, week)
+                if transaction_period is not None:
                     [(player_id, roster_id)] = list(tx['adds'].items())
-                    asyncio.create_task(check_pickup(player_id,roster_id,add_time, channel))
+                    asyncio.create_task(check_pickup(
+                        tx_id, player_id, roster_id, add_time, api_week, channel
+                    ))
                     seen_transactions[tx_id] = add_time
             
         except Exception as e:
@@ -216,7 +336,7 @@ async def monitor_pickups():
         
         await asyncio.sleep(CHECK_INTERVAL_SEC)
 
-async def check_pickup(player_id, roster_id, pickup_time, channel):
+async def check_pickup(transaction_id, player_id, roster_id, pickup_time, api_week, channel):
     try:
         now = datetime.now(timezone.utc)
 
@@ -224,8 +344,11 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
         if delay > 0:
             await asyncio.sleep(delay)
 
-        week = get_week_by_cutoff(START_DATE,pickup_time)
-        transctions = fetch_transactions(LEAGUE_ID, week)
+        period = get_tracking_period(pickup_time)
+        if period is None:
+            return
+        week = period[0]
+        transctions = fetch_transactions(LEAGUE_ID, api_week)
 
         team = roster_map_cache.get(roster_id, "Unknown")
         player = player_map_cache.get(player_id, "Unknown Player")
@@ -234,10 +357,14 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
             print(f"Player {player} was dropped within {DROP_THRESHOLD_MIN} minutes by team {team}. No action needed.")
             return
 
-        pickup_counts[team].append(player)
+        try:
+            log_pickup(transaction_id, pickup_time, roster_id, team, player_id, player)
+        except (OSError, csv.Error, UnicodeError) as exc:
+            print(f"Unable to log pickup {transaction_id}: {exc}")
+
+        pickup_number = record_pickup(week, team, player)
 
         if pickup_time >= STARTUP:
-            pickup_number = len(pickup_counts[team])
             if pickup_number > PICKUP_MAX:
                 suffix = "💀 **Limit surpassed!**"
             elif pickup_number == PICKUP_MAX:
@@ -247,7 +374,7 @@ async def check_pickup(player_id, roster_id, pickup_time, channel):
             else:
                 suffix = ""
 
-            message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/{PICKUP_MAX} this week\n{suffix}"
+            message = f"🏀 **New Pickup Alert!**\n{team} added **{player}** \nPickup #{pickup_number}/{PICKUP_MAX} this week (Week {week})\n{suffix}"
             await safe_send(channel, message)
     except Exception as e:
         print(f"Error in check_pickup: {e}")
@@ -283,7 +410,11 @@ async def on_message(message):
     if message.author == client.user:
         return
     if message.content == "!pickups":
-        summary = format_summary(get_week_by_cutoff(START_DATE))
+        period = get_tracking_period()
+        if period is None:
+            await message.channel.send("Pickup tracking has not started yet.")
+            return
+        summary = format_summary(period[0])
         await message.channel.send(summary)
 
 if __name__ == "__main__":
