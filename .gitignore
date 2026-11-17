@@ -1,3 +1,9 @@
 .env
-.vscode/launch.json
-__pycache__/tracker.cpython-311.pyc
+.vscode/settings.json
+__pycache__/
+*.py[cod]
+.venv/
+pickup_logs/
+tracker_state.json
+weekly_data.json
+matchups_cache.json

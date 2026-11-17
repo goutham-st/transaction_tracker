@@ -1,18 +1,20 @@
-from collections import defaultdict
+import argparse
 import json
 import math
-from random import random
-import numpy as np
-import requests
-import time
-from dotenv import load_dotenv
 import os
 import sys
-from tracker import START_DATE, get_week_by_cutoff
-from statistics import pstdev,mean
+import time
+from collections import defaultdict
+from random import random
+from statistics import mean
+
+from dotenv import load_dotenv
 import matplotlib.pyplot as plt
-import argparse
+import numpy as np
+import requests
 from scipy import special
+
+from tracker import SEASON_OPENER, get_tracking_period
 
 load_dotenv()
 LEAGUE_ID = os.getenv("LEAGUE_ID")
@@ -22,15 +24,52 @@ if not LEAGUE_ID:
     sys.exit(1)
 
 GAMMA = 0.88
-ALPHA = 0.75
-LAST_WEEK = 21
+REGULAR_SEASON_LAST_WEEK = 21
+LAST_WEEK = REGULAR_SEASON_LAST_WEEK
 NUM_SIMS = 10000
 REGRESSION_FACTOR = 1
 CURR_WIN_PROB_MATRIX = None
 SLOPE = 1.12
+PF_RANKING_WEIGHT = 0.65
+MAX_PF_RANKING_WEIGHT = 0.35
 session = requests.Session()
 session.headers["Connection"] = "close"
-CACHE_FILE = "matchups_cache.json"
+SEASON_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), str(SEASON_OPENER.year)
+)
+WEEKLY_DATA_FILE = os.path.join(SEASON_DATA_DIR, "weekly_data.json")
+CACHE_FILE = os.path.join(SEASON_DATA_DIR, "matchups_cache.json")
+
+def ensure_season_data_files():
+    os.makedirs(SEASON_DATA_DIR, exist_ok=True)
+    for path in (WEEKLY_DATA_FILE, CACHE_FILE):
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as data_file:
+                json.dump({}, data_file, indent=2)
+
+def clamp_week(week, last_week=LAST_WEEK):
+    return min(int(week), last_week)
+
+def get_current_week(now=None):
+    tracking_period = get_tracking_period(now)
+    tracking_week = tracking_period[0] if tracking_period is not None else 1
+    return min(max(1, tracking_week), LAST_WEEK + 1)
+
+def format_record(wins, completed_weeks):
+    return f"{wins}-{completed_weeks - wins}"
+
+def get_seed_map(wins):
+    ordered_teams = sorted(wins, key=lambda team: (-wins[team], str(team)))
+    return {team: seed for seed, team in enumerate(ordered_teams, start=1)}
+
+def get_seed_delta_summary(actual_seeds, median_seeds):
+    seed_deltas = {
+        team: actual_seeds[team] - median_seeds[team]
+        for team in actual_seeds
+    }
+    improved = sum(delta > 0 for delta in seed_deltas.values())
+    average_delta = mean(seed_deltas.values()) if seed_deltas else 0
+    return improved, average_delta
 
 def fetch(url, retries=10):
     i = 0
@@ -62,7 +101,11 @@ def get_roster_map(league_id):
             if owner_id in user_map:
                 roster_map[roster_id] = user_map[owner_id]['display_name']
                 settings = roster['settings']
-                scoring_map[roster_id] = (settings['fpts'],settings['fpts_against'],settings['ppts'])
+                scoring_map[roster_id] = (
+                    settings['fpts'] + settings['fpts_decimal'] / 100,
+                    settings['fpts_against'] + settings['fpts_against_decimal'] / 100,
+                    settings['ppts'] + settings['ppts_decimal'] / 100,
+                )
                 actual_win_map[roster_id] = roster['metadata']['record'].count("W")
         return roster_map,scoring_map,actual_win_map
     except requests.RequestException as e:
@@ -70,6 +113,8 @@ def get_roster_map(league_id):
         return {}
 
 def fetch_matchups(league_id, week):
+    ensure_season_data_files()
+
     # Build a unique key for this request
     key = f"{league_id}-{week}"
 
@@ -102,6 +147,22 @@ def fetch_matchups(league_id, week):
 
     return data
 
+def initialize_team_history(team_history, completed_weeks, roster_ids):
+    fields = ("pf", "pa", "mpf")
+    history_updated = False
+
+    for week in range(1, completed_weeks + 1):
+        week_data = team_history.setdefault(str(week), {})
+        for roster_id in roster_ids:
+            stats = week_data.setdefault(roster_id, {})
+            for field in fields:
+                if field not in stats:
+                    stats[field] = 0
+                    history_updated = True
+
+    if history_updated:
+        save_team_history(WEEKLY_DATA_FILE, team_history)
+
 
 def load_team_history(path):
     with open(path, "r") as f:
@@ -112,9 +173,13 @@ def get_weekly_arrays(team_history, completed_weeks):
     weekly_z = defaultdict(list)
     ewtd = defaultdict(list)
 
-    for team_data in team_history.values():
+    for week in range(1, completed_weeks + 1):
+        team_data = team_history.get(str(week), {})
+        if not team_data:
+            continue
+
         team_ids = list(team_data.keys())
-        scores = np.array([stats['pf'] for stats in team_data.values()],dtype=int)
+        scores = np.array([stats['pf'] for stats in team_data.values()], dtype=float)
         
         std = scores.std()
         if np.isclose(std, 0):
@@ -138,6 +203,27 @@ def get_weekly_arrays(team_history, completed_weeks):
             ewtd[team_id].append(rank / 15)
 
     return weekly_z, ewtd
+
+def get_weekly_field_z_scores(team_history, field, completed_weeks):
+    field_z_scores = defaultdict(list)
+
+    for week in range(1, int(completed_weeks) + 1):
+        team_data = team_history.get(str(week), {})
+        if not team_data:
+            continue
+
+        team_ids = list(team_data)
+        scores = np.array([stats[field] for stats in team_data.values()], dtype=float)
+        std = scores.std()
+        if np.isclose(std, 0):
+            z_scores = np.zeros_like(scores, dtype=float)
+        else:
+            z_scores = (scores - scores.mean()) / std
+
+        for team_id, z_score in zip(team_ids, z_scores):
+            field_z_scores[team_id].append(float(z_score))
+
+    return field_z_scores
 
 def save_team_history(path, team_history):
     with open(path, "w") as f:
@@ -277,12 +363,15 @@ def main():
 
     parser.add_argument("--simulate-season", action="store_true",
                         help="Run full season simulation")
+
+    parser.add_argument("--playoff-mode", action="store_true",
+                        help="Include playoff outcome simulation")
     
     parser.add_argument("--current-week-probs", action="store_true",
                         help="Get the probabilities for this week's matchups")
     
-    parser.add_argument("--backtesting", action="store_true",
-                        help="Perform backtesting")
+    # parser.add_argument("--backtesting", action="store_true",
+    #                     help="Perform backtesting")
     
     parser.add_argument("--momentum", action="store_true",
                         help="Get momentum using last 3 weeks")
@@ -304,122 +393,160 @@ def main():
 
     # Load shared data
 
-    current_week = get_week_by_cutoff(START_DATE)
+    current_week = get_current_week()
     completed_weeks = current_week - 1
     rosters,scores,actual_wins = get_roster_map(LEAGUE_ID)
-    team_history = load_team_history("weekly_data.json")
+    ensure_season_data_files()
+    team_history = load_team_history(WEEKLY_DATA_FILE)
+    initialize_team_history(team_history, completed_weeks, rosters)
 
     # --- COMMAND ROUTING ---
 
     if args.update_week:
-        if str(completed_weeks) not in team_history:        
-            update_week_data(str(completed_weeks), scores, team_history, rosters)
-            print(f"Updated data for week {completed_weeks}")
-        else:
-            print("Data already up to date")
+        update_week_data(str(completed_weeks), scores, team_history)
+        print(f"Updated data for week {completed_weeks}")
 
     teams_list = sorted(rosters.keys(), key=int)
     team_index = {team: i for i, team in enumerate(teams_list)}
 
-    if args.backtesting:
+    # if args.backtesting:
         
-        bt_correct = bt_total = total_underdog_games = upsets = 0
-        bt_brier = 0.0
+    #     bt_correct = bt_total = total_underdog_games = upsets = 0
+    #     bt_brier = 0.0
 
-        buckets = {
-            (0.50, 0.55): [],
-            (0.55, 0.60): [],
-            (0.60, 0.65): [],
-            (0.65, 0.70): [],
-            (0.70, 0.75): [],
-            (0.75, 1.01): []
-        }
+    #     buckets = {
+    #         (0.50, 0.55): [],
+    #         (0.55, 0.60): [],
+    #         (0.60, 0.65): [],
+    #         (0.65, 0.70): [],
+    #         (0.70, 0.75): [],
+    #         (0.75, 1.01): []
+    #     }
 
-        wpm_map = {}
-        weekly_z = defaultdict(list)
+    #     wpm_map = {}
+    #     weekly_z = defaultdict(list)
 
-        for week in range(1, current_week):
+    #     for week in range(1, current_week):
             
-            rating_map = get_weekly_arrays_for_week(team_history, weekly_z, week)
-            wpm = get_wpm(teams_list, rating_map)
-            wpm_map[week] = wpm
+    #         rating_map = get_weekly_arrays_for_week(team_history, weekly_z, week)
+    #         wpm = get_wpm(teams_list, rating_map)
+    #         wpm_map[week] = wpm
 
-            if week >= 2:
-                matchup_map = defaultdict(list)
-                for team in fetch_matchups(LEAGUE_ID, week):
-                    matchup_map[team['matchup_id']].append(team_index[str(team['roster_id'])])
-                games = list(matchup_map.values())          # predict Week N+1
+    #         if week >= 2:
+    #             matchup_map = defaultdict(list)
+    #             for team in fetch_matchups(LEAGUE_ID, week):
+    #                 matchup_map[team['matchup_id']].append(team_index[str(team['roster_id'])])
+    #             games = list(matchup_map.values())          # predict Week N+1
 
-                wpm = wpm_map[week - 1]  # ratings BEFORE the game
-                week_data = team_history[str(week)]
+    #             wpm = wpm_map[week - 1]  # ratings BEFORE the game
+    #             week_data = team_history[str(week)]
                             
-                for i, j in games:
-                    # predicted probability at the time
-                    p = wpm[i,j]
+    #             for i, j in games:
+    #                 # predicted probability at the time
+    #                 p = wpm[i,j]
 
-                    pfA = week_data[teams_list[i]]['pf']
-                    pfB = week_data[teams_list[j]]['pf']
+    #                 pfA = week_data[teams_list[i]]['pf']
+    #                 pfB = week_data[teams_list[j]]['pf']
 
-                    # actual outcome
-                    actual = 1 if pfA > pfB else 0 
+    #                 # actual outcome
+    #                 actual = 1 if pfA > pfB else 0
 
-                    # accuracy
-                    pred_winner = i if p >= 0.5 else j
-                    actual_winner = i if actual == 1 else j
-                    if pred_winner == actual_winner:
-                        bt_correct += 1
-                    bt_total += 1
+    #                 # accuracy
+    #                 pred_winner = i if p >= 0.5 else j
+    #                 actual_winner = i if actual == 1 else j
+    #                 if pred_winner == actual_winner:
+    #                     bt_correct += 1
+    #                 bt_total += 1
 
-                    if p < 0.5:
-                        total_underdog_games += 1
-                        if actual_winner == i:
-                            upsets += 1
+    #                 if p < 0.5:
+    #                     total_underdog_games += 1
+    #                     if actual_winner == i:
+    #                         upsets += 1
 
-                    # Brier contribution
-                    bt_brier += (p - actual)**2
+    #                 # Brier contribution
+    #                 bt_brier += (p - actual)**2
 
-                    # Bucket
-                    for (low, high) in buckets:
-                        if low <= p < high:
-                            buckets[(low, high)].append((p,actual))
-                            break
-                        elif low <= 1 - p < high:
-                            buckets[(low, high)].append((1-p,1-actual))
-                            break
+    #                 # Bucket
+    #                 for (low, high) in buckets:
+    #                     if low <= p < high:
+    #                         buckets[(low, high)].append((p,actual))
+    #                         break
+    #                     elif low <= 1 - p < high:
+    #                         buckets[(low, high)].append((1-p,1-actual))
+    #                         break
 
-        # final metrics
-        bt_accuracy = bt_correct / bt_total
-        bt_brier_score = bt_brier / bt_total
+    #     # final metrics
+    #     bt_accuracy = bt_correct / bt_total
+    #     bt_brier_score = bt_brier / bt_total
 
-        print("Backtest accuracy:", bt_accuracy)
-        print("Backtest Brier:", bt_brier_score)
-        print("Calibration buckets:")
-        for (low, high), outcomes in buckets.items():
-            if outcomes:
-               avg_pred = sum(q for q, _ in outcomes) / len(outcomes)
-               avg_actual = sum(a for _, a in outcomes) / len(outcomes)
-               print(f"{low:.2f}-{high:.2f}: pred={avg_pred:.3f}, actual={avg_actual:.3f}, n={len(outcomes)}")
+    #     print("Backtest accuracy:", bt_accuracy)
+    #     print("Backtest Brier:", bt_brier_score)
+    #     print("Calibration buckets:")
+    #     for (low, high), outcomes in buckets.items():
+    #         if outcomes:
+    #            avg_pred = sum(q for q, _ in outcomes) / len(outcomes)
+    #            avg_actual = sum(a for _, a in outcomes) / len(outcomes)
+    #            print(f"{low:.2f}-{high:.2f}: pred={avg_pred:.3f}, actual={avg_actual:.3f}, n={len(outcomes)}")
 
-        if total_underdog_games > 0:
-            upset_frequency = upsets / total_underdog_games
-        else:
-            upset_frequency = 0
+    #     if total_underdog_games > 0:
+    #         upset_frequency = upsets / total_underdog_games
+    #     else:
+    #         upset_frequency = 0
 
-        print("Upset frequency:", upset_frequency)
+    #     print("Upset frequency:", upset_frequency)
         
     weekly_z, ewtd = get_weekly_arrays(team_history, completed_weeks)
 
     if args.versus_median:
-        median_wins = {rosters[team] : sum(1 for win in wins if win > 0.5) + actual_wins[team] for team, wins in ewtd.items()}
-        median_wins_sorted = sorted(median_wins.items(), key=lambda x:x[1], reverse=True)
+
+        completed_weeks = clamp_week(completed_weeks, REGULAR_SEASON_LAST_WEEK)
+
+        median_wins = {
+            team: sum(1 for win in ewtd[team] if win > 0.5) + actual_wins[team]
+            for team in actual_wins
+        }
+        total_pf = {
+            team: sum(
+                float(team_history.get(str(week), {}).get(team, {}).get("pf", 0))
+                for week in range(1, completed_weeks + 1)
+            )
+            for team in median_wins
+        }
+
+        median_wins_sorted = sorted(
+            median_wins,
+            key=lambda team: (-median_wins[team], -total_pf[team], str(team)),
+        )
+        team_width = max(len(rosters[team]) for team in median_wins_sorted)
+        pf_width = max(len(f"{total_pf[team]:.2f}") for team in median_wins_sorted)
+        record_width = max(
+            len(format_record(median_wins[team], completed_weeks * 2))
+            for team in median_wins_sorted
+        )
         print("Versus median record:")
-        for i,(team, wins) in enumerate(median_wins_sorted,start=1):
-            print(f"{i}. {team}: {wins}-{completed_weeks*2-wins}")
+        print(
+            f"{'Team':<{team_width}} | {'Orig':>{record_width}} -> "
+            f"{'Median':<{record_width}} | {'Total PF':>{pf_width}}"
+        )
+        for team in median_wins_sorted:
+            median_record = format_record(median_wins[team], completed_weeks * 2)
+            actual_record = format_record(actual_wins[team], completed_weeks)
+            print(
+                f"{rosters[team]:<{team_width}} | "
+                f"{actual_record:>{record_width}} -> {median_record:<{record_width}} | "
+                f"{total_pf[team]:>{pf_width}.2f}"
+            )
         
+    max_pf_weekly_z = get_weekly_field_z_scores(
+        team_history, "mpf", completed_weeks
+    )
+
     if args.momentum:
-        # consider weighting mean
-        momentum = {rosters[team] : mean(z_scores[-3:]) 
-                    for team,z_scores in weekly_z.items()}
+        momentum_scores = get_momentum_scores(weekly_z, max_pf_weekly_z)
+        momentum = {
+            rosters[team]: score
+            for team, score in momentum_scores.items()
+        }
         
         momentum_sorted = sorted(momentum.items(),
                                  key=lambda x:x[1],
@@ -433,7 +560,9 @@ def main():
         for team, m in momentum_sorted[-3:][::-1]:
             print(f"{team}: {m}")
 
-    power_ranking_map, curr_team_rating_map = get_rating_maps(completed_weeks, weekly_z, ewtd)
+    power_ranking_map, curr_team_rating_map = get_rating_maps(
+        completed_weeks, weekly_z, max_pf_weekly_z
+    )
 
     if args.strength_of_schedule:
         remaining_schedule = get_remaining_schedule(current_week, team_index)
@@ -461,9 +590,13 @@ def main():
     if args.print_power_rankings:
         prev_week = completed_weeks - 1
         prev_weekly_z = {k: v[:-1] for k, v in weekly_z.items()}
-        prev_ewtd = {k: v[:-1] for k, v in ewtd.items()}
+        prev_max_pf_weekly_z = {
+            k: v[:-1] for k, v in max_pf_weekly_z.items()
+        }
         
-        prev_power_ranking_map, _ = get_rating_maps(prev_week, prev_weekly_z, prev_ewtd)
+        prev_power_ranking_map, _ = get_rating_maps(
+            prev_week, prev_weekly_z, prev_max_pf_weekly_z
+        )
 
         print_power_rankings(power_ranking_map,rosters,current_week,prev_power_ranking_map)
 
@@ -478,7 +611,7 @@ def main():
 
     if args.simulate_season:
         remaining_schedule = get_remaining_schedule(current_week, team_index)
-        seed_counts, expected_wins_acc, championship_odds, toilet_odds,finals_matchups,toilet_matchups = simulate_season(teams_list, remaining_schedule, actual_wins, scores, completed_weeks > LAST_WEEK)
+        seed_counts, expected_wins_acc, championship_odds, toilet_odds,finals_matchups,toilet_matchups = simulate_season(teams_list, remaining_schedule, actual_wins, scores, args.playoff_mode)
         champ_probs = championship_odds / NUM_SIMS
         champ_sorted_idx = np.argsort(champ_probs)[::-1]
         print("Championship Odds:")
@@ -509,23 +642,50 @@ def main():
         remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
         print_week_win_probs(remaining_schedule,rosters,current_week,teams_list)
 
-def get_rating_maps(completed_weeks, weekly_z, ewtd):
-    
-    total_ewtd = {team : sum(ew) for team, ew in ewtd.items()}
-    ewtd_normalized = {team : (ewtd_t - completed_weeks / 2) / (pstdev(total_ewtd.values())) 
-                       for team, ewtd_t in total_ewtd.items()}
-    
-    weights = get_recency_weights(completed_weeks)
-
+def get_rating_maps(completed_weeks, weekly_pf_z, weekly_max_pf_z):
     power_ranking_map = {}
     curr_team_rating_map = {}
 
-    for team,z_list in weekly_z.items():
-        team_rating = get_rating(completed_weeks,weights,z_list)
-        curr_team_rating_map[team] = team_rating
-        power_ranking_map[team] = ALPHA*team_rating + (1-ALPHA)*ewtd_normalized[team]
+    for team, pf_scores in weekly_pf_z.items():
+        max_pf_scores = weekly_max_pf_z.get(team, [])
+        weeks_to_score = min(
+            int(completed_weeks), len(pf_scores), len(max_pf_scores)
+        )
+        if weeks_to_score:
+            pf_rating = mean(pf_scores[:weeks_to_score])
+            max_pf_rating = mean(max_pf_scores[:weeks_to_score])
+            rating = (
+                PF_RANKING_WEIGHT * pf_rating
+                + MAX_PF_RANKING_WEIGHT * max_pf_rating
+            )
+        else:
+            rating = 0.0
+
+        power_ranking_map[team] = rating
+        curr_team_rating_map[team] = rating
 
     return power_ranking_map,curr_team_rating_map
+
+def get_momentum_scores(weekly_pf_z, weekly_max_pf_z):
+    momentum_scores = {}
+
+    for team, pf_scores in weekly_pf_z.items():
+        max_pf_scores = weekly_max_pf_z.get(team, [])
+        weeks_to_score = min(3, len(pf_scores), len(max_pf_scores))
+        if weeks_to_score:
+            weekly_scores = [
+                PF_RANKING_WEIGHT * pf_score
+                + MAX_PF_RANKING_WEIGHT * max_pf_score
+                for pf_score, max_pf_score in zip(
+                    pf_scores[-weeks_to_score:],
+                    max_pf_scores[-weeks_to_score:],
+                )
+            ]
+            momentum_scores[team] = mean(weekly_scores)
+        else:
+            momentum_scores[team] = 0.0
+
+    return momentum_scores
 
 def get_wpm(teams_list, rating_map, platt_model=None):
     ratings = np.array([rating_map[team] for team in teams_list])
@@ -690,30 +850,25 @@ def matchup_line(pA, pB, nameA, nameB):
     else:
         return f"{nameB} favored ({pB*100:.1f}% vs {pA*100:.1f}%)"
 
-def update_week_data(completed_weeks, scores, team_history, rosters):
+def update_week_data(completed_weeks, scores, team_history):
+    week_key = str(completed_weeks)
+    previous_history = {
+        week: data for week, data in team_history.items() if week != week_key
+    }
     new_data = {}
-    for team,(pf,_,_) in scores.items():
-        pf_sum = 0
-        for stats in team_history.values():
-            pf_sum += int(stats[team]['pf'])
-        if pf != pf_sum:
-            new_data[team] = {'pf' : pf - pf_sum}
-        else:
-            new_data = {}
-            for week in range(LAST_WEEK+1,int(completed_weeks)+1):
-                # Ask the user if they want to manually enter data
-                choice = input(f"Do you want to manually enter week {week} data? (yes/no): ").strip().lower()
-                if choice in ['yes','y']:                
-                    # Outer loop to repeat the prompt 16 times
-                    for id,name in rosters.items():
-                        # Inner loop to prompt for 3 values
-                        value = input(f"  Enter value for pf for {name}: ")
-                        new_data[id] = {'pf' : int(value)} 
-                    team_history[completed_weeks] = new_data
-            return
-                
-    team_history[completed_weeks] = new_data
-    save_team_history("weekly_data.json", team_history)
+    fields = ("pf", "pa", "mpf")
+
+    for team, totals in scores.items():
+        new_data[team] = {}
+        for field, total in zip(fields, totals):
+            previous_total = sum(
+                float(week_data.get(team, {}).get(field, 0))
+                for week_data in previous_history.values()
+            )
+            new_data[team][field] = total - previous_total
+
+    team_history[week_key] = new_data
+    save_team_history(WEEKLY_DATA_FILE, team_history)
 
 if __name__ == "__main__":
     main()

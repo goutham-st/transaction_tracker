@@ -27,8 +27,6 @@ if not CHANNEL_NAME:
     print("ERROR: CHANNEL_NAME environment variable is not set!")
     sys.exit(1)
 
-# TODO Don't hardcode DST
-START_DATE = datetime(2025, 10, 20, 7, tzinfo=timezone.utc)
 EASTERN = ZoneInfo("America/New_York")
 WEEK0_START = datetime(2026, 10, 12, 3, tzinfo=EASTERN)
 SEASON_OPENER = datetime(2026, 10, 20, 15, tzinfo=EASTERN)
