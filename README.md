@@ -25,7 +25,7 @@ This repository contains a Discord bot for monitoring Sleeper fantasy basketball
 - Pickup schedule: Season-specific tracking windows are defined by `WEEK0_START` and `SEASON_OPENER` in `tracker.py`
 - `DROP_THRESHOLD_MIN`: 5 minutes; pickups dropped within this window are ignored
 - `CHECK_INTERVAL_SEC`: 60 seconds; how often the tracker polls Sleeper
-- Analytics data files are stored locally under the season start year (for example, `2026/weekly_data.json` and `2026/matchups_cache.json`) and are excluded from Git. Missing completed-week entries are initialized with `pf`, `pa`, and `mpf` set to `0`; `--update-week` fills them from roster scoring totals.
+- Analytics data files are stored locally under the season start year (for example, `2026/weekly_data.json` and `2026/matchups_cache.json`) and are excluded from Git. Missing completed-week entries are initialized with `pf` and `pa` set to `0`; `--update-week` fills them from roster scoring totals.
 
 ## Discord Commands
 - `!pickups` - Display the weekly pickup summary with the roster and the players it added
@@ -40,7 +40,7 @@ The analytics script supports several CLI modes, including:
 - `--current-week-probs` to show model-estimated probabilities for current matchups
 - `--momentum`, `--parity`, `--strength-of-schedule`, and `--versus-median` for additional analysis views
 
-Backtesting is currently disabled. Power rankings combine per-week standardized scores with equal week weighting: 65% PF and 35% Max PF. Momentum uses the same PF/Max PF blend over the latest three completed weeks. Max PF is the best possible lineup score and provides a roster-potential signal alongside points actually scored.
+Backtesting is currently disabled. Power rankings average per-week standardized PF scores, with each completed week weighted equally. Momentum averages PF scores over the latest three completed weeks.
 
 Win probabilities and season simulations are estimates based on those ratings; the probability model has not been calibrated against historical outcomes.
 

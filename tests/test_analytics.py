@@ -39,43 +39,43 @@ def test_initialize_team_history_creates_all_zero_fields(monkeypatch, tmp_path):
 
     assert team_history == {
         "1": {
-            "1": {"pf": 12.5, "pa": 0, "mpf": 0},
-            "2": {"pf": 0, "pa": 0, "mpf": 0},
+            "1": {"pf": 12.5, "pa": 0},
+            "2": {"pf": 0, "pa": 0},
         },
         "2": {
-            "1": {"pf": 0, "pa": 0, "mpf": 0},
-            "2": {"pf": 0, "pa": 0, "mpf": 0},
+            "1": {"pf": 0, "pa": 0},
+            "2": {"pf": 0, "pa": 0},
         },
     }
     assert json.loads((tmp_path / "weekly_data.json").read_text()) == team_history
 
 
-def test_update_week_data_records_pf_pa_and_mpf_deltas(monkeypatch, tmp_path):
+def test_update_week_data_records_pf_and_pa_deltas(monkeypatch, tmp_path):
     monkeypatch.setattr(analytics, "WEEKLY_DATA_FILE", str(tmp_path / "weekly_data.json"))
     team_history = {
         "1": {
-            "1": {"pf": 100, "pa": 90, "mpf": 95},
-            "2": {"pf": 90, "pa": 100, "mpf": 95},
+            "1": {"pf": 100, "pa": 90},
+            "2": {"pf": 90, "pa": 100},
         }
     }
 
     analytics.update_week_data(
         "2",
         {
-            "1": (240.5, 210.25, 235.75),
-            "2": (200.25, 230.5, 205),
+            "1": (240.5, 210.25),
+            "2": (200.25, 230.5),
         },
         team_history,
     )
 
     assert team_history["2"] == {
-        "1": {"pf": 140.5, "pa": 120.25, "mpf": 140.75},
-        "2": {"pf": 110.25, "pa": 130.5, "mpf": 110},
+        "1": {"pf": 140.5, "pa": 120.25},
+        "2": {"pf": 110.25, "pa": 130.5},
     }
     assert json.loads((tmp_path / "weekly_data.json").read_text()) == team_history
 
 
-def test_roster_map_includes_sleeper_decimal_score_fields(monkeypatch):
+def test_roster_map_includes_sleeper_pf_and_pa_decimal_fields(monkeypatch):
     payloads = {
         "users": [{"user_id": "owner-1", "display_name": "Team 1"}],
         "rosters": [{
@@ -86,8 +86,6 @@ def test_roster_map_includes_sleeper_decimal_score_fields(monkeypatch):
                 "fpts_decimal": 50,
                 "fpts_against": 769,
                 "fpts_against_decimal": 25,
-                "ppts": 823,
-                "ppts_decimal": 75,
             },
             "metadata": {"record": "2-0"},
         }],
@@ -108,13 +106,12 @@ def test_roster_map_includes_sleeper_decimal_score_fields(monkeypatch):
 
     _, scores, _ = analytics.get_roster_map("league")
 
-    assert scores["1"] == (757.5, 769.25, 823.75)
+    assert scores["1"] == (757.5, 769.25)
 
 
-def test_rating_maps_handle_identical_team_totals():
+def test_rating_maps_handle_identical_pf_scores():
     ratings, team_ratings = analytics.get_rating_maps(
         1,
-        {"1": [0.0], "2": [0.0]},
         {"1": [0.0], "2": [0.0]},
     )
 
@@ -122,62 +119,28 @@ def test_rating_maps_handle_identical_team_totals():
     assert team_ratings == {"1": 0.0, "2": 0.0}
 
 
-def test_rating_maps_combine_equal_week_pf_and_max_pf_z_scores():
+def test_rating_maps_average_weekly_pf_z_scores():
     ratings, team_ratings = analytics.get_rating_maps(
         2,
-        {"1": [1.0, -1.0], "2": [-1.0, 1.0]},
-        {"1": [0.0, 2.0], "2": [0.0, -2.0]},
+        {"1": [1.0, 1.0], "2": [-1.0, -1.0]},
     )
 
-    assert ratings == {"1": 0.35, "2": -0.35}
+    assert ratings == {"1": 1.0, "2": -1.0}
     assert team_ratings == ratings
 
 
-def test_momentum_uses_power_ranking_formula_for_latest_three_weeks():
+def test_momentum_averages_latest_three_pf_z_scores():
     momentum = analytics.get_momentum_scores(
         {
             "1": [2.0, 1.0, 0.0, -1.0],
             "2": [-1.0, 0.0, 1.0, 2.0],
         },
-        {
-            "1": [-2.0, 0.0, 1.0, -1.0],
-            "2": [2.0, 0.0, -1.0, 1.0],
-        },
     )
 
-    expected_team_1 = (
-        (analytics.PF_RANKING_WEIGHT * 1.0 + analytics.MAX_PF_RANKING_WEIGHT * 0.0)
-        + (analytics.PF_RANKING_WEIGHT * 0.0 + analytics.MAX_PF_RANKING_WEIGHT * 1.0)
-        + (analytics.PF_RANKING_WEIGHT * -1.0 + analytics.MAX_PF_RANKING_WEIGHT * -1.0)
-    ) / 3
-    expected_team_2 = (
-        (analytics.PF_RANKING_WEIGHT * 0.0 + analytics.MAX_PF_RANKING_WEIGHT * 0.0)
-        + (analytics.PF_RANKING_WEIGHT * 1.0 + analytics.MAX_PF_RANKING_WEIGHT * -1.0)
-        + (analytics.PF_RANKING_WEIGHT * 2.0 + analytics.MAX_PF_RANKING_WEIGHT * 1.0)
-    ) / 3
-
     assert momentum == {
-        "1": expected_team_1,
-        "2": expected_team_2,
+        "1": 0.0,
+        "2": 1.0,
     }
-
-
-def test_weekly_max_pf_z_scores_are_normalized_per_week():
-    team_history = {
-        "1": {
-            "1": {"pf": 10, "pa": 0, "mpf": 10},
-            "2": {"pf": 20, "pa": 0, "mpf": 30},
-        },
-        "2": {
-            "1": {"pf": 30, "pa": 0, "mpf": 50},
-            "2": {"pf": 40, "pa": 0, "mpf": 50},
-        },
-    }
-
-    max_pf_z = analytics.get_weekly_field_z_scores(team_history, "mpf", 2)
-
-    assert max_pf_z["1"] == [-1.0, 0.0]
-    assert max_pf_z["2"] == [1.0, 0.0]
 
 
 def test_current_week_uses_tracker_period_boundaries():

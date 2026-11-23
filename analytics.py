@@ -30,8 +30,6 @@ NUM_SIMS = 10000
 REGRESSION_FACTOR = 1
 CURR_WIN_PROB_MATRIX = None
 SLOPE = 1.12
-PF_RANKING_WEIGHT = 0.65
-MAX_PF_RANKING_WEIGHT = 0.35
 session = requests.Session()
 session.headers["Connection"] = "close"
 SEASON_DATA_DIR = os.path.join(
@@ -104,7 +102,6 @@ def get_roster_map(league_id):
                 scoring_map[roster_id] = (
                     settings['fpts'] + settings['fpts_decimal'] / 100,
                     settings['fpts_against'] + settings['fpts_against_decimal'] / 100,
-                    settings['ppts'] + settings['ppts_decimal'] / 100,
                 )
                 actual_win_map[roster_id] = roster['metadata']['record'].count("W")
         return roster_map,scoring_map,actual_win_map
@@ -148,7 +145,7 @@ def fetch_matchups(league_id, week):
     return data
 
 def initialize_team_history(team_history, completed_weeks, roster_ids):
-    fields = ("pf", "pa", "mpf")
+    fields = ("pf", "pa")
     history_updated = False
 
     for week in range(1, completed_weeks + 1):
@@ -203,27 +200,6 @@ def get_weekly_arrays(team_history, completed_weeks):
             ewtd[team_id].append(rank / 15)
 
     return weekly_z, ewtd
-
-def get_weekly_field_z_scores(team_history, field, completed_weeks):
-    field_z_scores = defaultdict(list)
-
-    for week in range(1, int(completed_weeks) + 1):
-        team_data = team_history.get(str(week), {})
-        if not team_data:
-            continue
-
-        team_ids = list(team_data)
-        scores = np.array([stats[field] for stats in team_data.values()], dtype=float)
-        std = scores.std()
-        if np.isclose(std, 0):
-            z_scores = np.zeros_like(scores, dtype=float)
-        else:
-            z_scores = (scores - scores.mean()) / std
-
-        for team_id, z_score in zip(team_ids, z_scores):
-            field_z_scores[team_id].append(float(z_score))
-
-    return field_z_scores
 
 def save_team_history(path, team_history):
     with open(path, "w") as f:
@@ -537,12 +513,8 @@ def main():
                 f"{total_pf[team]:>{pf_width}.2f}"
             )
         
-    max_pf_weekly_z = get_weekly_field_z_scores(
-        team_history, "mpf", completed_weeks
-    )
-
     if args.momentum:
-        momentum_scores = get_momentum_scores(weekly_z, max_pf_weekly_z)
+        momentum_scores = get_momentum_scores(weekly_z)
         momentum = {
             rosters[team]: score
             for team, score in momentum_scores.items()
@@ -561,7 +533,7 @@ def main():
             print(f"{team}: {m}")
 
     power_ranking_map, curr_team_rating_map = get_rating_maps(
-        completed_weeks, weekly_z, max_pf_weekly_z
+        completed_weeks, weekly_z
     )
 
     if args.strength_of_schedule:
@@ -590,12 +562,9 @@ def main():
     if args.print_power_rankings:
         prev_week = completed_weeks - 1
         prev_weekly_z = {k: v[:-1] for k, v in weekly_z.items()}
-        prev_max_pf_weekly_z = {
-            k: v[:-1] for k, v in max_pf_weekly_z.items()
-        }
         
         prev_power_ranking_map, _ = get_rating_maps(
-            prev_week, prev_weekly_z, prev_max_pf_weekly_z
+            prev_week, prev_weekly_z
         )
 
         print_power_rankings(power_ranking_map,rosters,current_week,prev_power_ranking_map)
@@ -642,22 +611,14 @@ def main():
         remaining_schedule = get_remaining_schedule(current_week,team_index,current_week)
         print_week_win_probs(remaining_schedule,rosters,current_week,teams_list)
 
-def get_rating_maps(completed_weeks, weekly_pf_z, weekly_max_pf_z):
+def get_rating_maps(completed_weeks, weekly_pf_z):
     power_ranking_map = {}
     curr_team_rating_map = {}
 
     for team, pf_scores in weekly_pf_z.items():
-        max_pf_scores = weekly_max_pf_z.get(team, [])
-        weeks_to_score = min(
-            int(completed_weeks), len(pf_scores), len(max_pf_scores)
-        )
+        weeks_to_score = min(int(completed_weeks), len(pf_scores))
         if weeks_to_score:
-            pf_rating = mean(pf_scores[:weeks_to_score])
-            max_pf_rating = mean(max_pf_scores[:weeks_to_score])
-            rating = (
-                PF_RANKING_WEIGHT * pf_rating
-                + MAX_PF_RANKING_WEIGHT * max_pf_rating
-            )
+            rating = mean(pf_scores[:weeks_to_score])
         else:
             rating = 0.0
 
@@ -666,22 +627,13 @@ def get_rating_maps(completed_weeks, weekly_pf_z, weekly_max_pf_z):
 
     return power_ranking_map,curr_team_rating_map
 
-def get_momentum_scores(weekly_pf_z, weekly_max_pf_z):
+def get_momentum_scores(weekly_pf_z):
     momentum_scores = {}
 
     for team, pf_scores in weekly_pf_z.items():
-        max_pf_scores = weekly_max_pf_z.get(team, [])
-        weeks_to_score = min(3, len(pf_scores), len(max_pf_scores))
+        weeks_to_score = min(3, len(pf_scores))
         if weeks_to_score:
-            weekly_scores = [
-                PF_RANKING_WEIGHT * pf_score
-                + MAX_PF_RANKING_WEIGHT * max_pf_score
-                for pf_score, max_pf_score in zip(
-                    pf_scores[-weeks_to_score:],
-                    max_pf_scores[-weeks_to_score:],
-                )
-            ]
-            momentum_scores[team] = mean(weekly_scores)
+            momentum_scores[team] = mean(pf_scores[-weeks_to_score:])
         else:
             momentum_scores[team] = 0.0
 
@@ -856,7 +808,7 @@ def update_week_data(completed_weeks, scores, team_history):
         week: data for week, data in team_history.items() if week != week_key
     }
     new_data = {}
-    fields = ("pf", "pa", "mpf")
+    fields = ("pf", "pa")
 
     for team, totals in scores.items():
         new_data[team] = {}
